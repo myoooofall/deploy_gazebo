@@ -43,7 +43,7 @@ aluminum peripherial evaluation case.
                                           name:=camera
                                           topics_ns:=camera
                                           visualize:=true
-                                          align_depth:=false
+                                          align_depth:=true
                                           enable_pointCloud:=true
 
                                           unite_imu_method:=linear_interpolation

@@ -204,9 +204,9 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                 <infrared1OpticalframeName>${infrared1_optical_frame}</infrared1OpticalframeName>
                 <infrared2OpticalframeName>${infrared2_optical_frame}</infrared2OpticalframeName>
                 <!-- Depth camera settings -->
-                <rangeMinDepth>0.2</rangeMinDepth>
+                <rangeMinDepth>0.1</rangeMinDepth>
                 <xacro:unless value="${clip_distance > 0.0}">
-                    <rangeMaxDepth>10.0</rangeMaxDepth>
+                    <rangeMaxDepth>2.0</rangeMaxDepth>
                 </xacro:unless>
                 <xacro:if value="${clip_distance > 0.0}">
                     <rangeMaxDepth>${clip_distance}</rangeMaxDepth>

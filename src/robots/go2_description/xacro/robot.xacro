@@ -10,6 +10,7 @@
     <!-- <xacro:include filename="$(find go2_description)/xacro/stairs.xacro"/> -->
     <xacro:include filename="$(find go2_description)/xacro/gazebo.xacro"/>
     <xacro:include filename="$(find a1_description)/xacro/ros2_control.xacro"/>
+    <xacro:include filename="$(find go2_description)/xacro/_d435i.urdf.xacro"/>
     <!-- <xacro:include filename="$(find go2_gazebo)/launch/stairs.urdf.xacro"/> -->
 
     <!-- <xacro:stairs stairs="15" xpos="0" ypos="0" zpos="0" /> -->
@@ -123,4 +124,8 @@
     <xacro:leg name="FL" mirror="1"  mirror_dae="True"   front_hind="1"  front_hind_dae="True"  />
     <xacro:leg name="RR" mirror="-1" mirror_dae="False"  front_hind="-1" front_hind_dae="False" />
     <xacro:leg name="RL" mirror="1"  mirror_dae="True"   front_hind="-1" front_hind_dae="False" />
+    <!-- D345i相机 -->   
+    <xacro:sensor_d435i parent="trunk" name="camera" topics_ns="camera">
+        <origin  xyz="0.345 0 0.07" rpy="0 0.25 0"/>
+    </xacro:sensor_d435i>
 </robot>
