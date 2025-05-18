@@ -46,6 +46,7 @@ private:
 
     // plot
     const int plot_size = 100;
+    int motion_time = 1;
     std::vector<int> plot_t;
     std::vector<std::vector<double>> plot_real_joint_pos, plot_target_joint_pos,plot_actions;
     void Plot();

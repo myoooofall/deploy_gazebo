@@ -64,7 +64,7 @@
             </link>
             <!-- 第二个台子 -->
             <link name="platform_2">
-                <pose>3.5 0 0.15 0 0 0</pose>  <!-- 在x=3.5的位置，正前方 -->
+                <pose>5.5 0 0.15 0 0 0</pose>  <!-- 在x=3.5的位置，正前方 -->
                 <collision name="platform_2_collision">
                     <geometry>
                         <box>
@@ -86,7 +86,7 @@
             </link>
             <!-- 第三个台子 -->
             <link name="platform_3">
-                <pose>5 0 0.15 0 0 0</pose>  <!-- 在x=5的位置，正前方 -->
+                <pose>7.5 0 0.15 0 0 0</pose>  <!-- 在x=5的位置，正前方 -->
                 <collision name="platform_3_collision">
                     <geometry>
                         <box>
