@@ -99,6 +99,9 @@ RL_Sim::RL_Sim()
         this->ros_namespace + "robot_joint_controller/state", rclcpp::SystemDefaultsQoS(),
         [this] (const robot_msgs::msg::RobotState::SharedPtr msg) {this->RobotStateCallback(msg);}
     );
+    this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
+        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        std::bind(&RL_Sim::DepthImageCallback, this, std::placeholders::_1));
 
     // service
     this->gazebo_set_model_state_client = this->create_client<gazebo_msgs::srv::SetModelState>("/gazebo/set_model_state");
@@ -130,6 +133,9 @@ RL_Sim::RL_Sim()
 #ifdef CSV_LOGGER
     this->CSVInit(this->robot_name);
 #endif
+
+    // 初始化深度图buffer
+    depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
 
     std::cout << LOGGER::INFO << "RL_Sim start" << std::endl;
 }
@@ -279,6 +285,14 @@ void RL_Sim::RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg
     this->robot_state_subscriber_msg = *msg;
 }
 
+void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    torch::Tensor processed_depth = depth_buffer.process_depth_image(msg);
+    std::cout << "处理后的深度图形状: " << processed_depth.sizes() << std::endl;
+    std::cout << "处理后的深度图范围: [" << processed_depth.min().item<float>() << ", " << processed_depth.max().item<float>() << "]" << std::endl;
+    depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
+}
+
 void RL_Sim::RunModel()
 {
     // std::lock_guard<std::mutex> lock(robot_state_mutex); // TODO will cause thread timeout
@@ -333,52 +347,24 @@ torch::Tensor RL_Sim::Forward()
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
-        torch::Tensor vision_tokens;
-        std::string vision_tokens_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + "vision_tokens.ts";
-        try {
-            torch::jit::script::Module vision_model = torch::jit::load(vision_tokens_path,torch::kCPU);
-            vision_tokens = vision_model.forward({}).toTensor();
-           
-        } catch (const c10::Error& e) {
-            std::cerr << "加载失败: " << e.what() << std::endl;
-            exit(1);
-        }
-        // 保存最新的观测数据到CSV
-        // {// 保存最新的观测数据到CSV
-        // std::ofstream csv_file;
-        // std::ifstream check_file("history_obs.csv");
-        // bool is_new_file = !check_file.good();
-        // check_file.close();
         
-        // csv_file.open("history_obs.csv", std::ios::app);  // 以追加模式打开文件
+        // 获取处理后的深度图数据
+        this->depth_image = depth_buffer.get_depth_vec();
         
-        // if (csv_file.is_open()) {
-        //     // 如果是新文件，写入表头
-        //     if (is_new_file) {
-        //         csv_file << "timestep";
-        //         for (int i = 0; i < this->history_obs[0].size(0); ++i) {
-        //             csv_file << ",obs_" << i;
-        //         }
-        //         csv_file << "\n";
-        //     }
+        // 添加调试输出
+        std::cout << "深度图数据形状: " << this->depth_image.sizes() << std::endl;
+        std::cout << "深度图数据范围: [" << this->depth_image.min().item<float>() << ", " << this->depth_image.max().item<float>() << "]" << std::endl;
             
-        //     // 写入时间步和观测数据
-        //     csv_file << this->motiontime;  // 写入时间步
-        //     // 获取最新的观测数据（序列的最后一个）
-        //     auto latest_obs = this->history_obs[0].slice(0, -45, torch::indexing::None);
-        //     for (int i = 0; i < latest_obs.size(0); ++i) {
-        //         csv_file << "," << latest_obs[i].item<float>();
-        //     }
-        //     csv_file << "\n";
-        //     csv_file.close();
-        // } else {
-        //     std::cerr << "无法打开CSV文件进行写入" << std::endl;
-        // } }
-
         try {
             std::vector<torch::jit::IValue> inputs;
             inputs.push_back(this->history_obs);    // [1, 45]
-            inputs.push_back(vision_tokens);
+            
+            // 将深度图数据包装成 IValue 向量
+            std::vector<torch::jit::IValue> vision_inputs;
+            vision_inputs.push_back(this->depth_image);
+            this->vision_tokens = this->head_1.forward(vision_inputs).toTensor();
+            
+            inputs.push_back(this->vision_tokens);
             actions = this->backbone_1.forward(inputs).toTensor();
             
             // {

@@ -13,6 +13,7 @@
 #include <std_srvs/srv/empty.hpp>
 #include <gazebo_msgs/srv/set_model_state.hpp>
 #include <rcl_interfaces/srv/get_parameters.hpp>
+#include <sensor_msgs/msg/image.hpp>
 
 #include <csignal>
 
@@ -36,7 +37,7 @@ private:
     // history buffer
     ObservationBuffer history_obs_buf;
     torch::Tensor history_obs;
-
+    
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
     std::shared_ptr<LoopFunc> loop_control;
@@ -73,6 +74,13 @@ private:
     std::string gazebo_model_name;
     int motiontime = 0;
     std::map<std::string, size_t> sorted_to_original_index;
+
+    // 深度图相关
+    DepthBuffer depth_buffer;
+    torch::Tensor depth_image;
+    torch::Tensor vision_tokens;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
+    void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 };
 
 #endif // RL_SIM_HPP

@@ -11,7 +11,7 @@ def generate_launch_description():
     rname = LaunchConfiguration("rname")
     framework = LaunchConfiguration("framework")
 
-    wname = "stair"
+    wname = "stairs"
     robot_name = ParameterValue(Command(["echo -n ", rname, "_", framework]), value_type=str)
     ros_namespace = ParameterValue(Command(["echo -n ", "/", rname, "_gazebo"]), value_type=str)
     gazebo_model_name = ParameterValue(Command(["echo -n ", rname, "_gazebo"]), value_type=str)
@@ -46,7 +46,7 @@ def generate_launch_description():
     spawn_entity = Node(
         package="gazebo_ros",
         executable="spawn_entity.py",
-        arguments=["-topic", "/robot_description", "-entity", "robot_model"],
+        arguments=["-topic", "/robot_description", "-entity", "robot_model", "-x", "0.0", "-y", "0.0", "-z", "0.3", "-Y", "0.0"],
         output="screen",
     )
 

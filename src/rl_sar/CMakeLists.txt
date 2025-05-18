@@ -28,6 +28,7 @@ find_package(robot_joint_controller REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(gazebo_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 # Make sure to find correct Python version based on ROS distro
 if(DEFINED ENV{ROS_DISTRO})
@@ -92,6 +93,12 @@ endif()
 add_library(observation_buffer library/observation_buffer/observation_buffer.cpp)
 target_link_libraries(observation_buffer "${TORCH_LIBRARIES}")
 set_property(TARGET observation_buffer PROPERTY CXX_STANDARD 14)
+
+# 添加ROS2依赖
+ament_target_dependencies(observation_buffer
+  rclcpp
+  sensor_msgs
+)
 
 add_executable(rl_sim src/rl_sim.cpp )
 target_link_libraries(rl_sim

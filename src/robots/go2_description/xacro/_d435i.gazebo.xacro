@@ -144,7 +144,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                     <clip>
                         <near>0.1</near>
                         <xacro:unless value="${clip_distance > 0.0}">
-                            <far>100</far>
+                            <far>2.0</far>
                         </xacro:unless>
                         <xacro:if value="${clip_distance > 0.0}">
                             <far>${clip_distance}</far>
@@ -153,7 +153,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                     <noise>
                         <type>gaussian</type>
                         <mean>0.0</mean>
-                        <stddev>0.100</stddev>
+                        <stddev>0.01</stddev>
                     </noise>
                 </camera>
                 <always_on>1</always_on>
