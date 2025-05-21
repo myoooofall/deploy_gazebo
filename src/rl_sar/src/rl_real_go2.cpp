@@ -3,7 +3,7 @@
 // #define PLOT
 // #define CSV_LOGGER
 
-RL_Real::RL_Real()
+RL_Real::RL_Real(): Node("rl_real_go2") 
 {
     // read params from yaml
     this->robot_name = "go2_isaacgym";
@@ -35,6 +35,10 @@ RL_Real::RL_Real()
 
     this->joystick_subscriber.reset(new ChannelSubscriber<unitree_go::msg::dds_::WirelessController_>(TOPIC_JOYSTICK));
     this->joystick_subscriber->InitChannel(std::bind(&RL_Real::JoystickHandler, this, std::placeholders::_1), 1);
+    this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
+        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
+    this->depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
 
     // init rl
     torch::autograd::GradMode::set_enabled(false);
@@ -49,8 +53,9 @@ RL_Real::RL_Real()
 
     // model
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.model_name;
-    this->model = torch::jit::load(model_path);
-
+    //this->model = torch::jit::load(model_path);
+    this->head_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/head_1.pt");
+    this->backbone_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_1.pt");
     // loop
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::KeyboardInterface, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
@@ -201,7 +206,18 @@ torch::Tensor RL_Real::Forward()
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
-        actions = this->model.forward({this->history_obs}).toTensor();
+        this->depth_image = this->depth_buffer.get_depth_vec();
+        std::vector<torch::jit::IValue> inputs;
+            inputs.push_back(this->history_obs);    // [1, 45]
+            
+            // 将深度图数据包装成 IValue 向量
+            std::vector<torch::jit::IValue> vision_inputs;
+            vision_inputs.push_back(this->depth_image);
+            this->vision_tokens = this->head_1.forward(vision_inputs).toTensor();
+        
+        inputs.push_back(this->vision_tokens);
+        actions = this->backbone_1.forward(inputs).toTensor();
+        // actions = this->model.forward({this->history_obs}).toTensor();
     }
     else
     {
@@ -337,6 +353,17 @@ void RL_Real::JoystickHandler(const void *message)
 void signalHandler(int signum)
 {
     exit(0);
+}
+
+void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    // 只在每个时间步更新一次深度图
+    if (this->motiontime % 6 == 0) {  // 每5个时间步更新一次
+        torch::Tensor processed_depth = this->depth_buffer.process_depth_image(msg);
+        this->depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
+        this->motion_time = 1;
+    }
+    this->motion_time++;
 }
 
 int main(int argc, char **argv)

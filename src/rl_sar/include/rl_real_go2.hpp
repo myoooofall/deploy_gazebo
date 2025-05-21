@@ -14,7 +14,8 @@
 #include <unitree/common/thread/thread.hpp>
 #include <unitree/robot/go2/robot_state/robot_state_client.hpp>
 #include <csignal>
-
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include "matplotlibcpp.h"
 namespace plt = matplotlibcpp;
 
@@ -52,7 +53,7 @@ typedef union
     uint16_t value;
 } xKeySwitchUnion;
 
-class RL_Real : public RL
+class RL_Real : public RL, public rclcpp::Node
 {
 public:
     RL_Real();
@@ -69,6 +70,12 @@ private:
     // history buffer
     ObservationBuffer history_obs_buf;
     torch::Tensor history_obs;
+    DepthBuffer depth_buffer;
+    int motion_time = 1;
+    torch::Tensor depth_image;
+    torch::Tensor vision_tokens;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
+    void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
