@@ -29,7 +29,7 @@ find_package(rclpy REQUIRED)
 find_package(gazebo_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-
+find_package(realsense2 REQUIRED)
 # Make sure to find correct Python version based on ROS distro
 if(DEFINED ENV{ROS_DISTRO})
     set(ROS_DISTRO_ENV $ENV{ROS_DISTRO})
@@ -104,18 +104,21 @@ add_executable(rl_sim src/rl_sim.cpp )
 target_link_libraries(rl_sim
   -pthread
   rl_sdk observation_buffer yaml-cpp
+  realsense2
 )
 
 add_executable(rl_real_a1 src/rl_real_a1.cpp )
 target_link_libraries(rl_real_a1
   ${UNITREE_A1_LIBS}
   rl_sdk observation_buffer yaml-cpp
+  realsense2
 )
 
 add_executable(rl_real_go2 src/rl_real_go2.cpp )
 target_link_libraries(rl_real_go2
   ${UNITREE_GO2_LIBS}
   rl_sdk observation_buffer yaml-cpp
+  realsense2
 )
 
 ament_target_dependencies(rl_sim

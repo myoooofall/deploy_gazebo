@@ -1,11 +1,17 @@
 #include "rl_real_go2.hpp"
 
+
 // #define PLOT
 // #define CSV_LOGGER
 
-RL_Real::RL_Real(): Node("rl_real_go2") 
+RL_Real::RL_Real()
 {
-    // read params from yaml
+    // 初始化 RealSense
+    cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
+    pipe.start(cfg);
+    this->depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
+
+    // 然后初始化 Unitree 相关的功能
     this->robot_name = "go2_isaacgym";
     this->ReadYaml(this->robot_name);
     for (std::string &observation : this->params.observations)
@@ -35,10 +41,6 @@ RL_Real::RL_Real(): Node("rl_real_go2")
 
     this->joystick_subscriber.reset(new ChannelSubscriber<unitree_go::msg::dds_::WirelessController_>(TOPIC_JOYSTICK));
     this->joystick_subscriber->InitChannel(std::bind(&RL_Real::JoystickHandler, this, std::placeholders::_1), 1);
-    this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
-        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
-        std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
-    this->depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
 
     // init rl
     torch::autograd::GradMode::set_enabled(false);
@@ -76,10 +78,15 @@ RL_Real::RL_Real(): Node("rl_real_go2")
 #ifdef CSV_LOGGER
     this->CSVInit(this->robot_name);
 #endif
+
+    // 启动深度图处理线程
+    StartDepthThread();
 }
 
 RL_Real::~RL_Real()
 {
+    StopDepthThread();  // 确保在析构时停止线程
+    pipe.stop();  // 停止相机
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
@@ -149,9 +156,10 @@ void RL_Real::SetCommand(const RobotCommand<double> *command)
 
 void RL_Real::RobotControl()
 {
-    // std::lock_guard<std::mutex> lock(robot_state_mutex); // TODO will cause thread timeout
-
     this->motiontime++;
+    
+    // 更新深度图
+ 
 
     this->GetState(&this->robot_state);
     this->StateController(&this->robot_state, &this->robot_command);
@@ -160,8 +168,6 @@ void RL_Real::RobotControl()
 
 void RL_Real::RunModel()
 {
-    // std::lock_guard<std::mutex> lock(robot_state_mutex); // TODO will cause thread timeout
-
     if (this->running_state == STATE_RL_RUNNING)
     {
         this->obs.ang_vel = torch::tensor(this->robot_state.imu.gyroscope).unsqueeze(0);
@@ -355,15 +361,61 @@ void signalHandler(int signum)
     exit(0);
 }
 
-void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
-{
-    // 只在每个时间步更新一次深度图
-    if (this->motiontime % 6 == 0) {  // 每5个时间步更新一次
-        torch::Tensor processed_depth = this->depth_buffer.process_depth_image(msg);
-        this->depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
-        this->motion_time = 1;
+void RL_Real::StartDepthThread() {
+    depth_thread_running = true;
+    depth_thread = std::thread(&RL_Real::DepthThreadFunction, this);
+}
+
+void RL_Real::StopDepthThread() {
+    depth_thread_running = false;
+    if (depth_thread.joinable()) {
+        depth_thread.join();
     }
-    this->motion_time++;
+}
+
+void RL_Real::DepthThreadFunction() {
+    while (depth_thread_running) {
+        try {
+            if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
+                // 设置帧等待超时时间为100ms
+                rs2::frameset frames = pipe.wait_for_frames(100);
+                if (frames) {
+                    rs2::depth_frame depth = frames.get_depth_frame();
+                    
+                    // 处理深度图数据
+                    torch::Tensor processed_depth = torch::zeros({60, 86});
+                    
+                    // 将深度数据转换为tensor
+                    for(int i = 0; i < 60; i++) {
+                        for(int j = 0; j < 86; j++) {
+                            float depth_value = depth.get_distance(j * (depth.get_width()/86), 
+                                                                 i * (depth.get_height()/60));
+                            processed_depth[i][j] = depth_value;
+                        }
+                    }
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(depth_mutex);
+                        this->depth_buffer.insert(processed_depth.unsqueeze(0));
+                    }
+                }
+            }
+            // 休眠时间设置为控制循环周期的一半，确保不会错过时间步
+            std::this_thread::sleep_for(std::chrono::microseconds(2500));  // 5ms的一半
+        }
+        catch (const rs2::error& e) {
+            std::cerr << "RealSense error: " << e.what() << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(1));  // 出错后等待一段时间再重试
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Error in depth thread: " << e.what() << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+}
+
+void RL_Real::UpdateDepthImage() {
+    // 这个函数现在不需要做任何事情，因为更新在单独的线程中进行
 }
 
 int main(int argc, char **argv)
@@ -377,13 +429,12 @@ int main(int argc, char **argv)
     }
 
     ChannelFactory::Instance()->Init(0, argv[1]);
-
     RL_Real rl_sar;
-
-    while (1)
+    
+    while(1)
     {
-        sleep(10);
-    };
+        sleep(1);
+    }
 
     return 0;
 }

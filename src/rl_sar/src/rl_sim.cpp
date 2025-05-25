@@ -262,7 +262,7 @@ void RL_Sim::RobotControl()
     //     this->control.control_state = STATE_WAITING;
     // }
     else if (simulation_running)
-    {
+    {   
         this->motiontime++;
         this->GetState(&this->robot_state);
         this->StateController(&this->robot_state, &this->robot_command);

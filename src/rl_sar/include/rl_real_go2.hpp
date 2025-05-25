@@ -14,9 +14,11 @@
 #include <unitree/common/thread/thread.hpp>
 #include <unitree/robot/go2/robot_state/robot_state_client.hpp>
 #include <csignal>
-#include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/image.hpp>
 #include "matplotlibcpp.h"
+#include <librealsense2/rs.hpp>
+#include <thread>
+#include <mutex>
+#include <atomic>
 namespace plt = matplotlibcpp;
 
 using namespace unitree::common;
@@ -53,7 +55,7 @@ typedef union
     uint16_t value;
 } xKeySwitchUnion;
 
-class RL_Real : public RL, public rclcpp::Node
+class RL_Real : public RL
 {
 public:
     RL_Real();
@@ -71,11 +73,9 @@ private:
     ObservationBuffer history_obs_buf;
     torch::Tensor history_obs;
     DepthBuffer depth_buffer;
-    int motion_time = 1;
+   
     torch::Tensor depth_image;
     torch::Tensor vision_tokens;
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
-    void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 
     // loop
     std::shared_ptr<LoopFunc> loop_keyboard;
@@ -106,11 +106,22 @@ private:
     xKeySwitchUnion unitree_joy;
 
     // others
-    int motiontime = 0;
+    std::atomic<int> motiontime{0};
     std::vector<double> mapped_joint_positions;
     std::vector<double> mapped_joint_velocities;
     int command_mapping[12] = {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8};
     int state_mapping[12] = {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8};
+
+    // RealSense camera
+    rs2::pipeline pipe;
+    rs2::config cfg;
+    void UpdateDepthImage();
+    std::thread depth_thread;
+    std::mutex depth_mutex;
+    std::atomic<bool> depth_thread_running{false};
+    void DepthThreadFunction();
+    void StartDepthThread();
+    void StopDepthThread();
 };
 
 #endif // RL_REAL_HPP

@@ -131,6 +131,19 @@ void RL::StateController(const RobotState<double> *state, RobotCommand<double> *
     static float getup_percent = 0.0;
     static float getdown_percent = 0.0;
 
+    if (this->control.control_state == STATE_EMERGENCY_STOP)
+    {
+        for (int i = 0; i < this->params.num_of_dofs; ++i)
+        {
+            command->motor_command.q[i] = 0;
+            command->motor_command.dq[i] = 0;
+            command->motor_command.kp[i] = 0;
+            command->motor_command.kd[i] = 0;
+            command->motor_command.tau[i] = 0;
+        }
+        return;
+    }
+
     // waiting
     if (this->running_state == STATE_WAITING)
     {
@@ -379,6 +392,7 @@ void RL::KeyboardInterface()
             this->control.control_state = STATE_POS_GETDOWN;
             break;
         case 'q':
+            this->control.control_state = STATE_EMERGENCY_STOP;
             break;
         case 'w':
             this->control.x += 0.1;
