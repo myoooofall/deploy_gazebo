@@ -159,7 +159,7 @@ void RL_Real::RobotControl()
     this->motiontime++;
     
     // 更新深度图
- 
+
 
     this->GetState(&this->robot_state);
     this->StateController(&this->robot_state, &this->robot_command);
@@ -377,35 +377,48 @@ void RL_Real::DepthThreadFunction() {
     while (depth_thread_running) {
         try {
             if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
-                // 设置帧等待超时时间为100ms
                 rs2::frameset frames = pipe.wait_for_frames(100);
                 if (frames) {
                     rs2::depth_frame depth = frames.get_depth_frame();
+                    std::cout << "原始深度图尺寸: " << depth.get_width() << "x" << depth.get_height() << std::endl;
                     
                     // 处理深度图数据
                     torch::Tensor processed_depth = torch::zeros({60, 86});
                     
-                    // 将深度数据转换为tensor
+                    // 将深度数据转换为tensor并进行处理
                     for(int i = 0; i < 60; i++) {
                         for(int j = 0; j < 86; j++) {
                             float depth_value = depth.get_distance(j * (depth.get_width()/86), 
                                                                  i * (depth.get_height()/60));
+                            
+                            // 将深度值从毫米转换为米
+                            depth_value = depth_value / 1000.0;
+                            
+                            // 裁剪到0.2-2.0米范围
+                            depth_value = std::clamp(depth_value, 0.2f, 2.0f);
+                            
+                            // 归一化到-0.5到0.5范围
+                            // 先将0.2-2.0映射到0-1
+                            depth_value = (depth_value - 1.0f) / (2.0f );
+                           
+                            
                             processed_depth[i][j] = depth_value;
                         }
                     }
-                    
+                    // 打印处理后的深度图信息
+                    std::cout << "处理后的深度图尺寸: " << processed_depth.sizes() << std::endl;
+                    std::cout << "处理后的深度值范围: [" << processed_depth.min().item<float>() << ", " << processed_depth.max().item<float>() << "] 米" << std::endl;
                     {
                         std::lock_guard<std::mutex> lock(depth_mutex);
                         this->depth_buffer.insert(processed_depth.unsqueeze(0));
                     }
                 }
             }
-            // 休眠时间设置为控制循环周期的一半，确保不会错过时间步
-            std::this_thread::sleep_for(std::chrono::microseconds(2500));  // 5ms的一半
+            std::this_thread::sleep_for(std::chrono::microseconds(2500));
         }
         catch (const rs2::error& e) {
             std::cerr << "RealSense error: " << e.what() << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));  // 出错后等待一段时间再重试
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         catch (const std::exception& e) {
             std::cerr << "Error in depth thread: " << e.what() << std::endl;
@@ -433,7 +446,7 @@ int main(int argc, char **argv)
     
     while(1)
     {
-        sleep(1);
+        sleep(10);
     }
 
     return 0;

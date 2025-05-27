@@ -288,7 +288,7 @@ void RL_Sim::RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg
 void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     // 只在每个时间步更新一次深度图
-    if (this->motiontime % 6 == 0) {  // 每5个时间步更新一次
+    if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg);
         depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
         this->motion_time = 1;

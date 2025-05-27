@@ -129,7 +129,7 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
     
     // 归一化到-0.5到0.5范围
-    depth_tensor = (depth_tensor - 1.1) / 1.8;  // (x - 1.1) / 1.8 将0.2-2.0映射到-0.5-0.5
+    depth_tensor = (depth_tensor - 1) / 2;  // (x - 1.1) / 1.8 将0.2-2.0映射到-0.5-0.5
     
     // 打印归一化后的范围
     std::cout << "归一化后的范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
