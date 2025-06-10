@@ -14,6 +14,27 @@ public:
                                 torch::dtype(torch::kFloat32));
     }
 
+    // Add move constructor and move assignment operator
+    DepthBuffer(DepthBuffer&& other) noexcept
+        : num_envs(other.num_envs), height(other.height), width(other.width),
+          include_history_steps(other.include_history_steps),
+          depth_buf(std::move(other.depth_buf)) {}
+
+    DepthBuffer& operator=(DepthBuffer&& other) noexcept {
+        if (this != &other) {
+            num_envs = other.num_envs;
+            height = other.height;
+            width = other.width;
+            include_history_steps = other.include_history_steps;
+            depth_buf = std::move(other.depth_buf);
+        }
+        return *this;
+    }
+
+    // Delete copy constructor and copy assignment operator
+    DepthBuffer(const DepthBuffer&) = delete;
+    DepthBuffer& operator=(const DepthBuffer&) = delete;
+
     void insert(torch::Tensor new_depth) {
         std::lock_guard<std::mutex> lock(mutex);
         // Shift observations back
@@ -55,11 +76,11 @@ private:
 
 class DepthTest {
 public:
-    DepthTest() {
+    DepthTest() 
+        : depth_buffer(1, 60, 86, 2) {  // Initialize in constructor's initialization list
         // 初始化 RealSense
         cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
         pipe.start(cfg);
-        depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
     }
 
     ~DepthTest() {
@@ -81,14 +102,59 @@ public:
                     // 处理深度图数据
                     torch::Tensor processed_depth = torch::zeros({60, 86});
                     
-                    // 将深度数据转换为tensor
-                    for(int i = 0; i < 60; i++) {
-                        for(int j = 0; j < 86; j++) {
-                            float depth_value = depth.get_distance(j * (depth.get_width()/86), 
-                                                                 i * (depth.get_height()/60));
-                            processed_depth[i][j] = depth_value;
-                        }
+                    // 获取原始深度数据
+                    std::vector<uint16_t> depth_data;
+                    depth_data.reserve(depth.get_width() * depth.get_height());
+                    const uint16_t* data_ptr = reinterpret_cast<const uint16_t*>(depth.get_data());
+                    
+                    for (int i = 0; i < depth.get_width() * depth.get_height(); i++) {
+                        depth_data.push_back(data_ptr[i]);
                     }
+                    
+                    // 创建深度tensor
+                    torch::Tensor depth_tensor = torch::from_blob(depth_data.data(), 
+                        {depth.get_height(), depth.get_width()}, torch::kInt16).clone();
+                    
+                    // 打印原始深度值范围
+                    std::cout << "原始深度值范围: [" << depth_tensor.min().item<int16_t>() << ", " 
+                              << depth_tensor.max().item<int16_t>() << "]" << std::endl;
+                    
+                    // 转换为float类型并转换为米
+                    depth_tensor = depth_tensor.to(torch::kFloat32) / 1000.0;  // 转换为米
+                    
+                    // 打印转换为米后的范围
+                    std::cout << "转换为米后的范围: [" << depth_tensor.min().item<float>() << ", " 
+                              << depth_tensor.max().item<float>() << "]" << std::endl;
+                    
+                    // 将深度值裁剪到0.2-2.0米范围
+                    depth_tensor = torch::clamp(depth_tensor, 0.2, 2.0);
+                    
+                    // 打印裁剪后的范围
+                    std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " 
+                              << depth_tensor.max().item<float>() << "]" << std::endl;
+                    
+                    // 归一化到-0.5到0.5范围
+                    depth_tensor = (depth_tensor - 1) / 2;  // (x - 1.1) / 1.8 将0.2-2.0映射到-0.5-0.5
+                    
+                    // 打印归一化后的范围
+                    std::cout << "归一化后的范围: [" << depth_tensor.min().item<float>() << ", " 
+                              << depth_tensor.max().item<float>() << "]" << std::endl;
+                    
+                    // 调整大小到目标尺寸
+                    depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // 添加batch和channel维度
+                    depth_tensor = torch::nn::functional::interpolate(
+                        depth_tensor,
+                        torch::nn::functional::InterpolateFuncOptions()
+                            .size(std::vector<int64_t>{60, 86})
+                            .mode(torch::kBilinear)
+                            .align_corners(false)
+                    );
+                    
+                    // 打印调整后的深度值范围
+                    std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " 
+                              << depth_tensor.max().item<float>() << "]" << std::endl;
+                    
+                    processed_depth = depth_tensor.squeeze(0).squeeze(0);  // 移除batch和channel维度
                     
                     // 打印处理后的深度图信息
                     std::cout << "处理后的深度图尺寸: " << processed_depth.sizes() << std::endl;

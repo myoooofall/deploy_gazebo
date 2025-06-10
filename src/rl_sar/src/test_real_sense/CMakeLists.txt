@@ -7,10 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 查找必要的包
 find_package(realsense2 REQUIRED)
+set(Torch_DIR /home/nvidia/.local/lib/python3.10/site-packages/torch/share/cmake/Torch)
 find_package(Torch REQUIRED)
 
 # 添加可执行文件
-add_executable(test_depth test_depth.cpp)
+add_executable(test_depth test_realsense.cpp)
 
 # 链接库
 target_link_libraries(test_depth
