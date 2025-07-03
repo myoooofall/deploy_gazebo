@@ -1,14 +1,20 @@
 #include "rl_real_go2.hpp"
+#include <rclcpp/logging.hpp>
 
 
 // #define PLOT
 // #define CSV_LOGGER
 
 RL_Real::RL_Real()
+    : rclcpp::Node("rl_real_node")
 {
-    // 初始化 RealSense
-    cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
-    pipe.start(cfg);
+    // ROS depth image subscriber
+    RCLCPP_INFO(this->get_logger(), "Creating depth image subscriber...");
+    this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
+        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "Creating depth image subscriber OK");
+    // 初始化深度图buffer
     this->depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
 
     // 然后初始化 Unitree 相关的功能
@@ -24,6 +30,8 @@ RL_Real::RL_Real()
     }
 
     // init robot
+    std::cout << "init robot"<< std::endl;
+    // ChannelFactory::Instance()->Init(0, "lo");
     this->InitRobotStateClient();
     while (this->QueryServiceStatus("sport_mode"))
     {
@@ -31,16 +39,16 @@ RL_Real::RL_Real()
         this->rsc.ServiceSwitch("sport_mode", 0);
         sleep(1);
     }
-    this->InitLowCmd();
-    // create publisher
-    this->lowcmd_publisher.reset(new ChannelPublisher<unitree_go::msg::dds_::LowCmd_>(TOPIC_LOWCMD));
-    this->lowcmd_publisher->InitChannel();
-    // create subscriber
-    this->lowstate_subscriber.reset(new ChannelSubscriber<unitree_go::msg::dds_::LowState_>(TOPIC_LOWSTATE));
-    this->lowstate_subscriber->InitChannel(std::bind(&RL_Real::LowStateMessageHandler, this, std::placeholders::_1), 1);
+        this->InitLowCmd();
+        // create publisher
+        this->lowcmd_publisher.reset(new ChannelPublisher<unitree_go::msg::dds_::LowCmd_>(TOPIC_LOWCMD));
+        this->lowcmd_publisher->InitChannel();
+        // create subscriber
+        this->lowstate_subscriber.reset(new ChannelSubscriber<unitree_go::msg::dds_::LowState_>(TOPIC_LOWSTATE));
+        this->lowstate_subscriber->InitChannel(std::bind(&RL_Real::LowStateMessageHandler, this, std::placeholders::_1), 1);
 
-    this->joystick_subscriber.reset(new ChannelSubscriber<unitree_go::msg::dds_::WirelessController_>(TOPIC_JOYSTICK));
-    this->joystick_subscriber->InitChannel(std::bind(&RL_Real::JoystickHandler, this, std::placeholders::_1), 1);
+        this->joystick_subscriber.reset(new ChannelSubscriber<unitree_go::msg::dds_::WirelessController_>(TOPIC_JOYSTICK));
+        this->joystick_subscriber->InitChannel(std::bind(&RL_Real::JoystickHandler, this, std::placeholders::_1), 1);
 
     // init rl
     torch::autograd::GradMode::set_enabled(false);
@@ -65,6 +73,7 @@ RL_Real::RL_Real()
     this->loop_keyboard->start();
     this->loop_control->start();
     this->loop_rl->start();
+    std::cout << "init ok"<< std::endl;
 
 #ifdef PLOT
     this->plot_t = std::vector<int>(this->plot_size, 0);
@@ -78,15 +87,10 @@ RL_Real::RL_Real()
 #ifdef CSV_LOGGER
     this->CSVInit(this->robot_name);
 #endif
-
-    // 启动深度图处理线程
-    StartDepthThread();
 }
 
 RL_Real::~RL_Real()
 {
-    StopDepthThread();  // 确保在析构时停止线程
-    pipe.stop();  // 停止相机
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
@@ -94,6 +98,17 @@ RL_Real::~RL_Real()
     this->loop_plot->shutdown();
 #endif
     std::cout << LOGGER::INFO << "RL_Real exit" << std::endl;
+}
+
+void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    // 只在每个时间步更新一次深度图
+    if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
+        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg);
+        depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
+        this->motiontime = 1;
+    }
+    this->motiontime++;
 }
 
 void RL_Real::GetState(RobotState<double> *state)
@@ -212,26 +227,43 @@ torch::Tensor RL_Real::Forward()
     torch::Tensor clamped_obs = this->ComputeObservation();
 
     torch::Tensor actions;
-    if (!this->params.observations_history.empty())
+    if (this->params.observations_history.size() != 0)
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
-        this->depth_image = this->depth_buffer.get_depth_vec();
-        std::vector<torch::jit::IValue> inputs;
+        
+        // 获取处理后的深度图数据
+        this->depth_image = depth_buffer.get_depth_vec();
+
+        // 添加调试输出
+        // std::cout << "深度图数据形状: " << this->depth_image.sizes() << std::endl;
+        // std::cout << "深度图数据范围: [" << this->depth_image.min().item<float>() << ", " << this->depth_image.max().item<float>() << "]" << std::endl;
+        try{
+            std::vector<torch::jit::IValue> inputs;
             inputs.push_back(this->history_obs);    // [1, 45]
             
             // 将深度图数据包装成 IValue 向量
             std::vector<torch::jit::IValue> vision_inputs;
             vision_inputs.push_back(this->depth_image);
             this->vision_tokens = this->head_1.forward(vision_inputs).toTensor();
-        
-        inputs.push_back(this->vision_tokens);
-        actions = this->backbone_1.forward(inputs).toTensor();
-        // actions = this->model.forward({this->history_obs}).toTensor();
+            
+            inputs.push_back(this->vision_tokens);
+            actions = this->backbone_1.forward(inputs).toTensor();
+
+            // {
+            //     std::lock_guard<std::mutex> lock(action_mutex_);
+            //     for (int i = 0; i < this->params.num_of_dofs; ++i) {
+            //     this->output_actions[i] = actions[0][i].item<double>();}
+            // }
+        }catch(const c10::Error& e)
+        {
+            std::cerr << "模型推理失败: " << e.what() << std::endl;
+        }
     }
     else
     {
-        actions = this->model.forward({clamped_obs}).toTensor();
+        std::cout << "something went wrong"<<std::endl;
+        // actions = this->model.forward({clamped_obs}).toTensor();
     }
 
     if (this->params.clip_actions_upper.numel() != 0 && this->params.clip_actions_lower.numel() != 0)
@@ -365,120 +397,20 @@ void signalHandler(int signum)
     exit(0);
 }
 
-void RL_Real::StartDepthThread() {
-    depth_thread_running = true;
-    depth_thread = std::thread(&RL_Real::DepthThreadFunction, this);
-}
-
-void RL_Real::StopDepthThread() {
-    depth_thread_running = false;
-    if (depth_thread.joinable()) {
-        depth_thread.join();
-    }
-}
-
-void RL_Real::DepthThreadFunction() {
-    while (depth_thread_running) {
-        try {
-            if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
-                rs2::frameset frames = pipe.wait_for_frames(100);
-                if (frames) {
-                    rs2::depth_frame depth = frames.get_depth_frame();
-                    
-                    // 获取原始深度数据
-                    std::vector<uint16_t> depth_data;
-                    depth_data.reserve(depth.get_width() * depth.get_height());
-                    const uint16_t* data_ptr = reinterpret_cast<const uint16_t*>(depth.get_data());
-                    
-                    for (int i = 0; i < depth.get_width() * depth.get_height(); i++) {
-                        depth_data.push_back(data_ptr[i]);
-                    }
-                    
-                    // 创建深度tensor
-                    torch::Tensor depth_tensor = torch::from_blob(depth_data.data(), 
-                        {depth.get_height(), depth.get_width()}, torch::kInt16).clone();
-                    
-                    // 打印原始深度值范围
-                    // std::cout << "原始深度值范围: [" << depth_tensor.min().item<int16_t>() << ", " 
-                    //           << depth_tensor.max().item<int16_t>() << "]" << std::endl;
-                    
-                    // 转换为float类型并转换为米
-                    depth_tensor = depth_tensor.to(torch::kFloat32) / 1000.0;  // 转换为米
-                    
-                    // 打印转换为米后的范围
-                    // std::cout << "转换为米后的范围: [" << depth_tensor.min().item<float>() << ", " 
-                    //          << depth_tensor.max().item<float>() << "]" << std::endl;
-                    
-                    // 将深度值裁剪到0.2-2.0米范围
-                    depth_tensor = torch::clamp(depth_tensor, 0.2, 2.0);
-                    
-                    // 打印裁剪后的范围
-                    // std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " 
-                    //          << depth_tensor.max().item<float>() << "]" << std::endl;
-                    
-                    // 归一化到-0.5到0.5范围
-                    depth_tensor = (depth_tensor - 1) / 2;  // (x - 1.1) / 1.8 将0.2-2.0映射到-0.5-0.5
-                    
-                    // 打印归一化后的范围
-                    // std::cout << "归一化后的范围: [" << depth_tensor.min().item<float>() << ", " 
-                    //          << depth_tensor.max().item<float>() << "]" << std::endl;
-                    
-                    // 调整大小到目标尺寸
-                    depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // 添加batch和channel维度
-                    depth_tensor = torch::nn::functional::interpolate(
-                        depth_tensor,
-                        torch::nn::functional::InterpolateFuncOptions()
-                            .size(std::vector<int64_t>{60, 86})
-                            .mode(torch::kBilinear)
-                            .align_corners(false)
-                    );
-                    
-                    // 打印调整后的深度值范围
-                    //std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " 
-                    //          << depth_tensor.max().item<float>() << "]" << std::endl;
-                    
-                    torch::Tensor processed_depth = depth_tensor.squeeze(0).squeeze(0);  // 移除batch和channel维度
-                    
-                    {
-                        std::lock_guard<std::mutex> lock(depth_mutex);
-                        this->depth_buffer.insert(processed_depth.unsqueeze(0));
-                    }
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::microseconds(2500));
-        }
-        catch (const rs2::error& e) {
-            std::cerr << "RealSense error: " << e.what() << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-        catch (const std::exception& e) {
-            std::cerr << "Error in depth thread: " << e.what() << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-    }
-}
-
-void RL_Real::UpdateDepthImage() {
-    // 这个函数现在不需要做任何事情，因为更新在单独的线程中进行
-}
-
 int main(int argc, char **argv)
 {
-    signal(SIGINT, signalHandler);
+    // signal(SIGINT, signalHandler);
 
-    if (argc < 2)
-    {
-        std::cout << "Usage: " << argv[0] << " networkInterface" << std::endl;
-        exit(-1);
-    }
+    // if (argc < 2)
+    // {
+    //     std::cout << "Usage: " << argv[0] << " networkInterface" << std::endl;
+    //     exit(-1);
+    // }
 
-    ChannelFactory::Instance()->Init(0, argv[1]);
-    RL_Real rl_sar;
-    
-    while(1)
-    {
-        sleep(10);
-    }
+    ChannelFactory::Instance()->Init(0, "lo");
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<RL_Real>());
+    rclcpp::shutdown();
 
     return 0;
 }

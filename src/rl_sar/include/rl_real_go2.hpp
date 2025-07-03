@@ -15,7 +15,8 @@
 #include <unitree/robot/go2/robot_state/robot_state_client.hpp>
 #include <csignal>
 #include "matplotlibcpp.h"
-#include <librealsense2/rs.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -55,7 +56,7 @@ typedef union
     uint16_t value;
 } xKeySwitchUnion;
 
-class RL_Real : public RL
+class RL_Real : public RL, public rclcpp::Node
 {
 public:
     RL_Real();
@@ -112,16 +113,9 @@ private:
     int command_mapping[12] = {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8};
     int state_mapping[12] = {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8};
 
-    // RealSense camera
-    rs2::pipeline pipe;
-    rs2::config cfg;
-    void UpdateDepthImage();
-    std::thread depth_thread;
-    std::mutex depth_mutex;
-    std::atomic<bool> depth_thread_running{false};
-    void DepthThreadFunction();
-    void StartDepthThread();
-    void StopDepthThread();
+    // ROS depth image subscriber
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
+    void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 };
 
 #endif // RL_REAL_HPP
