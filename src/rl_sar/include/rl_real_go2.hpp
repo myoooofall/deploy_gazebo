@@ -115,6 +115,7 @@ private:
 
     // ROS depth image subscriber
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
+    rclcpp::Time last_image_time;
     void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 };
 

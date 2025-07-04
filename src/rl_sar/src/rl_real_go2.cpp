@@ -9,9 +9,10 @@ RL_Real::RL_Real()
     : rclcpp::Node("rl_real_node")
 {
     // ROS depth image subscriber
+    this->last_image_time = this->now();
     RCLCPP_INFO(this->get_logger(), "Creating depth image subscriber...");
     this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
-        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        "/camera/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     RCLCPP_INFO(this->get_logger(), "Creating depth image subscriber OK");
     // 初始化深度图buffer
@@ -102,6 +103,7 @@ RL_Real::~RL_Real()
 
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
+    this->last_image_time = this->now();
     // 只在每个时间步更新一次深度图
     if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg);
@@ -177,8 +179,11 @@ void RL_Real::RobotControl()
 {
     this->motiontime++;
     
-    // 更新深度图
-
+    // Check for depth image timeout (1 second threshold)
+    if ((this->now() - this->last_image_time).seconds() > 1.0) {
+        RCLCPP_ERROR(this->get_logger(), "Depth image timeout - entering emergency stop");
+        this->control.control_state = STATE_EMERGENCY_STOP;
+    }
 
     this->GetState(&this->robot_state);
     this->StateController(&this->robot_state, &this->robot_command);
