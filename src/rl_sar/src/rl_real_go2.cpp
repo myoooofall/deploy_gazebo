@@ -37,7 +37,7 @@ RL_Real::RL_Real()
     while (this->QueryServiceStatus("sport_mode"))
     {
         std::cout << "Try to deactivate the service: " << "sport_mode" << std::endl;
-        this->rsc.ServiceSwitch("sport_mode", 0);
+	//this->rsc.ServiceSwitch("sport_mode", 0);
         sleep(1);
     }
         this->InitLowCmd();
@@ -404,18 +404,23 @@ void signalHandler(int signum)
 
 int main(int argc, char **argv)
 {
-    // signal(SIGINT, signalHandler);
+    signal(SIGINT, signalHandler);
 
-    // if (argc < 2)
-    // {
-    //     std::cout << "Usage: " << argv[0] << " networkInterface" << std::endl;
-    //     exit(-1);
-    // }
+    if (argc < 2)
+    {
+        std::cout << "Usage: " << argv[0] << " networkInterface" << std::endl;
+        exit(-1);
+    }
 
-    ChannelFactory::Instance()->Init(0, "lo");
+    ChannelFactory::Instance()->Init(0, argv[1]);
     rclcpp::init(argc, argv);
+    //RL_Real rl_real;
     rclcpp::spin(std::make_shared<RL_Real>());
     rclcpp::shutdown();
+     while (1)
+    {
+        sleep(10);
+    }
 
     return 0;
 }

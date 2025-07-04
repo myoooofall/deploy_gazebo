@@ -9,7 +9,7 @@ set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-set(Torch_DIR /home/nvidia/.local/lib/python3.10/site-packages/torch/share/cmake/Torch)
+set(Torch_DIR /home/unitree/.local/lib/python3.8/site-packages/torch/share/cmake/Torch)
 find_package(Torch REQUIRED)
 set(CMAKE_INSTALL_RPATH "${Torch_DIR}/lib")
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
@@ -31,6 +31,7 @@ find_package(rclpy REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(realsense2 REQUIRED)
+find_package(unitree_sdk2 REQUIRED)
 # Make sure to find correct Python version based on ROS distro
 if(DEFINED ENV{ROS_DISTRO})
     set(ROS_DISTRO_ENV $ENV{ROS_DISTRO})
@@ -118,9 +119,9 @@ target_link_libraries(rl_real_a1
 
 add_executable(rl_real_go2 src/rl_real_go2.cpp )
 target_link_libraries(rl_real_go2
-  ${UNITREE_GO2_LIBS}
+	#${UNITREE_GO2_LIBS}
   rl_sdk observation_buffer yaml-cpp
-  realsense2
+  unitree_sdk2
 )
 
 # ament_target_dependencies(rl_sim
