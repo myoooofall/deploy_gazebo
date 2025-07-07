@@ -66,7 +66,7 @@ RL_Real::RL_Real()
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.model_name;
     //this->model = torch::jit::load(model_path);
     this->head_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/head_1.pt");
-    this->backbone_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_1.pt");
+    this->backbone_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_no_depth.pt");
     // loop
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::KeyboardInterface, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
@@ -195,8 +195,8 @@ void RL_Real::RunModel()
     if (this->running_state == STATE_RL_RUNNING)
     {
         this->obs.ang_vel = torch::tensor(this->robot_state.imu.gyroscope).unsqueeze(0);
-        // this->obs.commands = torch::tensor({{this->joystick.ly(), -this->joystick.rx(), -this->joystick.lx()}});
-        this->obs.commands = torch::tensor({{this->control.x, this->control.y, this->control.yaw}});
+        this->obs.commands = torch::tensor({{this->joystick.ly()*0.4, -this->joystick.rx()*0.4, -this->joystick.lx()*0.4}});
+        // this->obs.commands = torch::tensor({{this->control.x, this->control.y, this->control.yaw}});
         this->obs.base_quat = torch::tensor(this->robot_state.imu.quaternion).unsqueeze(0);
         this->obs.dof_pos = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
         this->obs.dof_vel = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
@@ -252,7 +252,7 @@ torch::Tensor RL_Real::Forward()
             vision_inputs.push_back(this->depth_image);
             this->vision_tokens = this->head_1.forward(vision_inputs).toTensor();
             
-            inputs.push_back(this->vision_tokens);
+            // inputs.push_back(this->vision_tokens);
             actions = this->backbone_1.forward(inputs).toTensor();
 
             // {
