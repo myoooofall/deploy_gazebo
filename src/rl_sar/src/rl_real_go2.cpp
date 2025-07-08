@@ -1,13 +1,22 @@
 #include "rl_real_go2.hpp"
 #include <rclcpp/logging.hpp>
-
+#include <getopt.h> // Required for getopt_long
 
 // #define PLOT
 // #define CSV_LOGGER
 
-RL_Real::RL_Real()
-    : rclcpp::Node("rl_real_node")
+RL_Real::RL_Real(const rclcpp::NodeOptions & options)
+    : rclcpp::Node("rl_real_node", options)
 {
+    // Declare and get parameters
+    this->declare_parameter("no_depth_forward", false);
+    this->declare_parameter("no_depth_check", false);
+
+    bool no_depth_forward = this->get_parameter("no_depth_forward").as_bool();
+    bool no_depth_check = this->get_parameter("no_depth_check").as_bool();
+    this->no_depth_check_ = no_depth_check; // Store the option in a member variable
+    this->no_depth_forward = no_depth_forward; // Store the option in a member variable
+
     // ROS depth image subscriber
     this->last_image_time = this->now();
     RCLCPP_INFO(this->get_logger(), "Creating depth image subscriber...");
@@ -15,6 +24,12 @@ RL_Real::RL_Real()
         "/camera/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     RCLCPP_INFO(this->get_logger(), "Creating depth image subscriber OK");
+
+    this->filtered_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/camera/depth/filtered", rclcpp::SystemDefaultsQoS());
+    this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
+
     // 初始化深度图buffer
     this->depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
 
@@ -37,7 +52,7 @@ RL_Real::RL_Real()
     while (this->QueryServiceStatus("sport_mode"))
     {
         std::cout << "Try to deactivate the service: " << "sport_mode" << std::endl;
-	//this->rsc.ServiceSwitch("sport_mode", 0);
+    //this->rsc.ServiceSwitch("sport_mode", 0);
         sleep(1);
     }
         this->InitLowCmd();
@@ -66,7 +81,17 @@ RL_Real::RL_Real()
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.model_name;
     //this->model = torch::jit::load(model_path);
     this->head_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/head_1.pt");
-    this->backbone_1 = torch::jit::load(std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_no_depth.pt");
+
+    std::string backbone_path;
+    if (no_depth_forward) {
+        backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_no_depth.pt";
+        RCLCPP_INFO(this->get_logger(), "Loading backbone_no_depth.pt due to --no-depth-forward option.");
+    } else {
+        backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_1.pt";
+        RCLCPP_INFO(this->get_logger(), "Loading backbone_1.pt.");
+    }
+    this->backbone_1 = torch::jit::load(backbone_path);
+
     // loop
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::KeyboardInterface, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
@@ -106,7 +131,9 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     this->last_image_time = this->now();
     // 只在每个时间步更新一次深度图
     if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
-        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg);
+        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
+            this->filtered_depth_publisher,
+            this->processed_depth_publisher);
         depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
         this->motiontime = 1;
     }
@@ -180,7 +207,7 @@ void RL_Real::RobotControl()
     this->motiontime++;
     
     // Check for depth image timeout (1 second threshold)
-    if ((this->now() - this->last_image_time).seconds() > 1.0) {
+    if (!this->no_depth_check_ && (this->now() - this->last_image_time).seconds() > 1.0) {
         RCLCPP_ERROR(this->get_logger(), "Depth image timeout - entering emergency stop");
         this->control.control_state = STATE_EMERGENCY_STOP;
     }
@@ -252,7 +279,11 @@ torch::Tensor RL_Real::Forward()
             vision_inputs.push_back(this->depth_image);
             this->vision_tokens = this->head_1.forward(vision_inputs).toTensor();
             
-            // inputs.push_back(this->vision_tokens);
+            // Only push vision_tokens if --no-depth-forward is NOT present
+            if (!this->no_depth_forward) {
+                 inputs.push_back(this->vision_tokens);
+            }
+           
             actions = this->backbone_1.forward(inputs).toTensor();
 
             // {
@@ -406,16 +437,60 @@ int main(int argc, char **argv)
 {
     signal(SIGINT, signalHandler);
 
-    if (argc < 2)
-    {
-        std::cout << "Usage: " << argv[0] << " networkInterface" << std::endl;
+    // Define long options for command line parsing
+    static struct option long_options[] = {
+        {"no-depth-forward", no_argument, 0, 'f'},
+        {"no-depth-check", no_argument, 0, 'c'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+    bool no_depth_forward_arg = false;
+    bool no_depth_check_arg = false;
+
+    // Parse command line arguments
+    while ((opt = getopt_long(argc, argv, "fch", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'f':
+                no_depth_forward_arg = true;
+                break;
+            case 'c':
+                no_depth_check_arg = true;
+                break;
+            case 'h':
+                std::cout << "Usage: " << argv[0] << " <networkInterface> [OPTIONS]" << std::endl;
+                std::cout << "Options:" << std::endl;
+                std::cout << "  --no-depth-forward   Do not pass vision_tokens to backbone_1 (use backbone_no_depth.pt)." << std::endl;
+                std::cout << "  --no-depth-check     Disable the depth image timeout emergency stop check." << std::endl;
+                std::cout << "  -h, --help           Show this help message and exit." << std::endl;
+                return 0;
+            case '?':
+                // getopt_long already printed an error message.
+                std::cout << "Usage: " << argv[0] << " <networkInterface> [OPTIONS]" << std::endl;
+                std::cout << "Use --help for more information." << std::endl;
+                return 1;
+            default:
+                abort();
+        }
+    }
+
+    if (optind >= argc) {
+        std::cout << "Usage: " << argv[0] << " <networkInterface> [OPTIONS]" << std::endl;
+        std::cout << "Use --help for more information." << std::endl;
         exit(-1);
     }
 
-    ChannelFactory::Instance()->Init(0, argv[1]);
+    ChannelFactory::Instance()->Init(0, argv[optind]);
     rclcpp::init(argc, argv);
-    //RL_Real rl_real;
-    rclcpp::spin(std::make_shared<RL_Real>());
+    // Create node options and set parameters
+    rclcpp::NodeOptions node_options;
+    node_options.append_parameter_override("no_depth_forward", no_depth_forward_arg);
+    node_options.append_parameter_override("no_depth_check", no_depth_check_arg);
+
+    // Create and spin the RL_Real node
+    rclcpp::spin(std::make_shared<RL_Real>(node_options));
     rclcpp::shutdown();
      while (1)
     {

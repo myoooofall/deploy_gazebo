@@ -1,12 +1,22 @@
 #include "rl_sim.hpp"
 #include <filesystem>
+#include <getopt.h> // Required for getopt_long
 
 //#define PLOT
 // #define CSV_LOGGER
 
-RL_Sim::RL_Sim()
+RL_Sim::RL_Sim(const rclcpp::NodeOptions & options)
     : rclcpp::Node("rl_sim_node")
 {
+    // Declare and get parameters
+    this->declare_parameter("no_depth_forward", false);
+    this->declare_parameter("no_depth_check", false);
+
+    bool no_depth_forward = this->get_parameter("no_depth_forward").as_bool();
+    bool no_depth_check = this->get_parameter("no_depth_check").as_bool();
+    this->no_depth_check_ = no_depth_check; // Store the option in a member variable
+    this->no_depth_forward = no_depth_forward; // Store the option in a member variable
+
     this->ros_namespace = this->get_namespace();
 
     // get params from param_node
@@ -72,8 +82,16 @@ RL_Sim::RL_Sim()
     // model
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.model_name;
     std::string head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.head_name;
-    std::string backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.backbone_name;
-    
+    // std::string backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.backbone_name;
+    std::string backbone_path;
+    if (no_depth_forward) {
+        backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_no_depth.pt";
+        RCLCPP_INFO(this->get_logger(), "Loading backbone_no_depth.pt due to --no-depth-forward option.");
+    } else {
+        backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_1.pt";
+        RCLCPP_INFO(this->get_logger(), "Loading backbone_1.pt.");
+    }
+    this->backbone_1 = torch::jit::load(backbone_path);
     // this->model = torch::jit::load(model_path);
     try {
         this->head_1 = torch::jit::load(head_path,torch::kCPU);
@@ -102,6 +120,11 @@ RL_Sim::RL_Sim()
     this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
         "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
         std::bind(&RL_Sim::DepthImageCallback, this, std::placeholders::_1));
+
+    this->filtered_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/camera/depth/filtered", rclcpp::SystemDefaultsQoS());
+    this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
 
     // service
     this->gazebo_set_model_state_client = this->create_client<gazebo_msgs::srv::SetModelState>("/gazebo/set_model_state");
@@ -289,7 +312,10 @@ void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     // 只在每个时间步更新一次深度图
     if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
-        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg);
+        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
+            this->filtered_depth_publisher,
+            this->processed_depth_publisher);
+        // torch::Tensor processed_depth = depth_buffer.process_depth_image_old(msg);
         depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
         this->motion_time = 1;
     }
@@ -366,8 +392,9 @@ torch::Tensor RL_Sim::Forward()
             std::vector<torch::jit::IValue> vision_inputs;
             vision_inputs.push_back(this->depth_image);
             this->vision_tokens = this->head_1.forward(vision_inputs).toTensor();
-            
-            inputs.push_back(this->vision_tokens);
+            if (!this->no_depth_forward) {
+                 inputs.push_back(this->vision_tokens);
+            }
             actions = this->backbone_1.forward(inputs).toTensor();
             
             // {
@@ -441,8 +468,57 @@ void RL_Sim::Plot()
 
 int main(int argc, char **argv)
 {
+    // Define long options for command line parsing
+    static struct option long_options[] = {
+        {"no-depth-forward", no_argument, 0, 'f'},
+        {"no-depth-check", no_argument, 0, 'c'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+    bool no_depth_forward_arg = false;
+    bool no_depth_check_arg = false;
+
+    // Parse command line arguments
+    while ((opt = getopt_long(argc, argv, "fch", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'f':
+                no_depth_forward_arg = true;
+                break;
+            case 'c':
+                no_depth_check_arg = true;
+                break;
+            case 'h':
+                std::cout << "Usage: " << argv[0] << " <networkInterface> [OPTIONS]" << std::endl;
+                std::cout << "Options:" << std::endl;
+                std::cout << "  --no-depth-forward   Do not pass vision_tokens to backbone_1 (use backbone_no_depth.pt)." << std::endl;
+                std::cout << "  --no-depth-check     Disable the depth image timeout emergency stop check." << std::endl;
+                std::cout << "  -h, --help           Show this help message and exit." << std::endl;
+                return 0;
+            case '?':
+                // getopt_long already printed an error message.
+                std::cout << "Usage: " << argv[0] << " <networkInterface> [OPTIONS]" << std::endl;
+                std::cout << "Use --help for more information." << std::endl;
+                return 1;
+            default:
+                abort();
+        }
+    }
+
+    if (optind >= argc) {
+        std::cout << "Usage: " << argv[0] << " <networkInterface> [OPTIONS]" << std::endl;
+        std::cout << "Use --help for more information." << std::endl;
+        exit(-1);
+    }
+
+    // Create node options and set parameters
+    rclcpp::NodeOptions node_options;
+    node_options.append_parameter_override("no_depth_forward", no_depth_forward_arg);
+    node_options.append_parameter_override("no_depth_check", no_depth_check_arg);
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<RL_Sim>());
+    rclcpp::spin(std::make_shared<RL_Sim>(node_options));
     rclcpp::shutdown();
     return 0;
 }

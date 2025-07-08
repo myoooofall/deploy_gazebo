@@ -4,6 +4,7 @@
 #include "rl_sdk.hpp"
 #include "observation_buffer.hpp"
 #include "loop.hpp"
+#include <rclcpp/publisher.hpp>
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
 #include <unitree/idl/go2/LowState_.hpp>
@@ -59,7 +60,7 @@ typedef union
 class RL_Real : public RL, public rclcpp::Node
 {
 public:
-    RL_Real();
+    RL_Real(const rclcpp::NodeOptions & options);
     ~RL_Real();
 
 private:
@@ -112,6 +113,10 @@ private:
     std::vector<double> mapped_joint_velocities;
     int command_mapping[12] = {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8};
     int state_mapping[12] = {3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8};
+    bool no_depth_check_ = false; // Flag for depth image check
+    bool no_depth_forward = false; // Flag for depth image forwarding
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr filtered_depth_publisher;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
 
     // ROS depth image subscriber
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
