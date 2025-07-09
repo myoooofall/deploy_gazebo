@@ -313,7 +313,6 @@ void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     // 只在每个时间步更新一次深度图
     if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
-            this->filtered_depth_publisher,
             this->processed_depth_publisher);
         // torch::Tensor processed_depth = depth_buffer.process_depth_image_old(msg);
         depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
@@ -381,8 +380,8 @@ torch::Tensor RL_Sim::Forward()
         this->depth_image = depth_buffer.get_depth_vec();
         
         // 添加调试输出
-        std::cout << "深度图数据形状: " << this->depth_image.sizes() << std::endl;
-        std::cout << "深度图数据范围: [" << this->depth_image.min().item<float>() << ", " << this->depth_image.max().item<float>() << "]" << std::endl;
+        // std::cout << "深度图数据形状: " << this->depth_image.sizes() << std::endl;
+        // std::cout << "深度图数据范围: [" << this->depth_image.min().item<float>() << ", " << this->depth_image.max().item<float>() << "]" << std::endl;
             
         try {
             std::vector<torch::jit::IValue> inputs;
