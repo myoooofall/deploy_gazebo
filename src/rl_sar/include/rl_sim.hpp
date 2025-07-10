@@ -23,7 +23,7 @@ namespace plt = matplotlibcpp;
 class RL_Sim : public RL, public rclcpp::Node
 {
 public:
-    RL_Sim(const rclcpp::NodeOptions & options);
+    RL_Sim(bool no_depth_forward_arg, bool no_depth_check_arg);
     ~RL_Sim();
 
 private:

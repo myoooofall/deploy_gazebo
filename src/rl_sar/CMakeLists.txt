@@ -32,6 +32,8 @@ find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(realsense2 REQUIRED)
 find_package(unitree_sdk2 REQUIRED)
+find_package(OpenCV REQUIRED)
+find_package(cv_bridge REQUIRED)
 # Make sure to find correct Python version based on ROS distro
 if(DEFINED ENV{ROS_DISTRO})
     set(ROS_DISTRO_ENV $ENV{ROS_DISTRO})
@@ -81,6 +83,7 @@ include_directories(
   library/observation_buffer
   library/rl_sdk
   library/loop
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 add_library(rl_sdk library/rl_sdk/rl_sdk.cpp)
@@ -94,13 +97,14 @@ else()
 endif()
 
 add_library(observation_buffer library/observation_buffer/observation_buffer.cpp)
-target_link_libraries(observation_buffer "${TORCH_LIBRARIES}")
+target_link_libraries(observation_buffer "${TORCH_LIBRARIES}" ${OpenCV_LIBS})
 set_property(TARGET observation_buffer PROPERTY CXX_STANDARD 17)
 
 # 添加ROS2依赖
 ament_target_dependencies(observation_buffer
   rclcpp
   sensor_msgs
+  cv_bridge
 )
 
 # add_executable(rl_sim src/rl_sim.cpp )

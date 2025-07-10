@@ -60,7 +60,7 @@ typedef union
 class RL_Real : public RL, public rclcpp::Node
 {
 public:
-    RL_Real(const rclcpp::NodeOptions & options);
+    RL_Real(bool no_depth_forward_arg, bool no_depth_check_arg);
     ~RL_Real();
 
 private:

@@ -161,10 +161,6 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
         // 假设最大深度为 10米，即 10000毫米
         // 可以根据实际传感器范围调整缩放因子
         depth_mat.convertTo(depth_uint16_mat, CV_16UC1, 1000.0); // 乘以1000将米转换为毫米
-
-        // cv::imshow("Processed Depth Image", depth_uint16_mat); // 可以继续显示 uint16 版本的图像
-        // cv::waitKey(1);
-
         auto image_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono16", depth_uint16_mat).toImageMsg();
         processed_publisher->publish(*image_msg);
     }

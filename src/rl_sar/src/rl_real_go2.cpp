@@ -5,17 +5,11 @@
 // #define PLOT
 // #define CSV_LOGGER
 
-RL_Real::RL_Real(const rclcpp::NodeOptions & options)
-    : rclcpp::Node("rl_real_node", options)
+RL_Real::RL_Real(bool no_depth_forward_arg, bool no_depth_check_arg)
+    : rclcpp::Node("rl_real_node")
 {
-    // Declare and get parameters
-    this->declare_parameter("no_depth_forward", false);
-    this->declare_parameter("no_depth_check", false);
-
-    bool no_depth_forward = this->get_parameter("no_depth_forward").as_bool();
-    bool no_depth_check = this->get_parameter("no_depth_check").as_bool();
-    this->no_depth_check_ = no_depth_check; // Store the option in a member variable
-    this->no_depth_forward = no_depth_forward; // Store the option in a member variable
+    this->no_depth_check_ = no_depth_check_arg; // Store the option in a member variable
+    this->no_depth_forward = no_depth_forward_arg; // Store the option in a member variable
 
     // ROS depth image subscriber
     this->last_image_time = this->now();
@@ -483,13 +477,8 @@ int main(int argc, char **argv)
 
     ChannelFactory::Instance()->Init(0, argv[optind]);
     rclcpp::init(argc, argv);
-    // Create node options and set parameters
-    rclcpp::NodeOptions node_options;
-    node_options.append_parameter_override("no_depth_forward", no_depth_forward_arg);
-    node_options.append_parameter_override("no_depth_check", no_depth_check_arg);
-
     // Create and spin the RL_Real node
-    rclcpp::spin(std::make_shared<RL_Real>(node_options));
+    rclcpp::spin(std::make_shared<RL_Real>(no_depth_forward_arg, no_depth_check_arg));
     rclcpp::shutdown();
      while (1)
     {

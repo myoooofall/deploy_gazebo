@@ -5,18 +5,9 @@
 //#define PLOT
 // #define CSV_LOGGER
 
-RL_Sim::RL_Sim(const rclcpp::NodeOptions & options)
+RL_Sim::RL_Sim(bool no_depth_forward_arg, bool no_depth_check_arg)
     : rclcpp::Node("rl_sim_node")
 {
-    // Declare and get parameters
-    this->declare_parameter("no_depth_forward", false);
-    this->declare_parameter("no_depth_check", false);
-
-    bool no_depth_forward = this->get_parameter("no_depth_forward").as_bool();
-    bool no_depth_check = this->get_parameter("no_depth_check").as_bool();
-    this->no_depth_check_ = no_depth_check; // Store the option in a member variable
-    this->no_depth_forward = no_depth_forward; // Store the option in a member variable
-
     this->ros_namespace = this->get_namespace();
 
     // get params from param_node
@@ -84,7 +75,9 @@ RL_Sim::RL_Sim(const rclcpp::NodeOptions & options)
     std::string head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.head_name;
     // std::string backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/" + this->params.backbone_name;
     std::string backbone_path;
-    if (no_depth_forward) {
+    this->no_depth_check_ = no_depth_check_arg; // Store the option in a member variable
+    this->no_depth_forward = no_depth_forward_arg; // Store the option in a member variable
+    if (this->no_depth_forward) {
         backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/models/" + this->robot_name + "/backbone_no_depth.pt";
         RCLCPP_INFO(this->get_logger(), "Loading backbone_no_depth.pt due to --no-depth-forward option.");
     } else {
@@ -513,11 +506,8 @@ int main(int argc, char **argv)
     }
 
     // Create node options and set parameters
-    rclcpp::NodeOptions node_options;
-    node_options.append_parameter_override("no_depth_forward", no_depth_forward_arg);
-    node_options.append_parameter_override("no_depth_check", no_depth_check_arg);
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<RL_Sim>(node_options));
+    rclcpp::spin(std::make_shared<RL_Sim>(no_depth_forward_arg, no_depth_check_arg));
     rclcpp::shutdown();
     return 0;
 }
