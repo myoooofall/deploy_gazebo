@@ -1,11 +1,11 @@
 # Copyright (c) 2024-2025 Yuxuan Ma
 # SPDX-License-Identifier: Apache-2.0
 
-lite3/himloco:
-  model_name: "policy_6_11.pt"
+lite3/puff:
+  head_name: "head_1.pt"
+  backbone_name: "backbone_1.pt"
   num_observations: 45
   observations: ["ang_vel", "gravity_vec","commands",  "dof_pos", "dof_vel", "actions"]
-#   observations_history: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]  # 0 is the latest observation
   observations_history: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]  # 0 is the latest observation
   observations_history_priority: "time"  # "time" or "term" priority
   clip_obs: 100.0
@@ -17,14 +17,14 @@ lite3/himloco:
                        100, 100, 100,
                        100, 100, 100,
                        100, 100, 100]
-  rl_kp: [20, 20, 20,
-          20, 20, 20,
-          20, 20, 20,
-          20, 20, 20]
-  rl_kd: [0.5, 0.5, 0.5,
-          0.5, 0.5, 0.5,
-          0.5, 0.5, 0.5,
-          0.5, 0.5, 0.5]
+  rl_kp: [40, 40, 40,
+          40, 40, 40,
+          40, 40, 40,
+          40, 40, 40]
+  rl_kd: [1, 1, 1,
+          1, 1, 1,
+          1, 1, 1,
+          1, 1, 1]
   fixed_kp: [40, 40, 40,
              40, 40, 40,
              40, 40, 40,
@@ -48,8 +48,8 @@ lite3/himloco:
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0]
-  default_dof_pos: [-0.1, 0.8, 1.50,
-                    0.0, 0.0, 1.50,
-                    0.0, 0.0, 1.50,
-                    0.0, 0.0, 1.50]
+  default_dof_pos: [-0.1, -0.80, 1.50,
+                     0.1, -0.80, 1.50,
+                    -0.1, -0.80, 1.50,
+                     0.1, -0.80, 1.50]
   joint_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]

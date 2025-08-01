@@ -15,6 +15,8 @@
     <depend>yaml-cpp</depend>
     <depend>robot_msgs</depend>
     <depend>geometry_msgs</depend>
+    <depend>sensor_msgs</depend>
+    <depend>cv_bridge</depend>
     <depend>robot_joint_controller</depend>
     <depend>controller_manager</depend>
     <depend>joint_state_controller</depend>

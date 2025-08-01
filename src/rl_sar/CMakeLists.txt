@@ -66,12 +66,15 @@ if(NOT USE_CMAKE)
         find_package(gazebo_msgs REQUIRED)
         find_package(std_srvs REQUIRED)
         find_package(geometry_msgs REQUIRED)
+        find_package(sensor_msgs REQUIRED)
+        find_package(cv_bridge REQUIRED)
         ament_package()
     endif()
     add_compile_options(${GAZEBO_CXX_FLAGS})
     find_package(gazebo REQUIRED)
 endif()
 
+set(Torch_DIR /home/lingmisaki/Documents/libtorch/share/cmake/Torch)
 find_package(Torch REQUIRED)
 find_package(TBB REQUIRED)
 find_package(Threads REQUIRED)
@@ -167,6 +170,9 @@ target_link_libraries(rl_sdk PUBLIC
     Python3::Module
     TBB::tbb
 )
+ament_target_dependencies(rl_sdk PUBLIC
+        cv_bridge
+    )
 find_package(Python3 COMPONENTS NumPy)
 if(Python3_NumPy_FOUND)
     target_link_libraries(rl_sdk PUBLIC Python3::NumPy)
@@ -179,8 +185,13 @@ if(NOT USE_CMAKE)
     endif()
 endif()
 
-add_library(observation_buffer library/core/observation_buffer/observation_buffer.cpp)
-target_link_libraries(observation_buffer PUBLIC "${TORCH_LIBRARIES}")
+add_library(observation_buffer library/core/observation_buffer/observation_buffer.cpp library/core/observation_buffer/depth_buffer.cpp)
+target_link_libraries(observation_buffer "${TORCH_LIBRARIES}")
+ament_target_dependencies(observation_buffer
+  rclcpp
+  sensor_msgs
+  cv_bridge
+)
 set_target_properties(observation_buffer PROPERTIES
     CXX_STANDARD 14
     CXX_STANDARD_REQUIRED ON

@@ -167,6 +167,11 @@ void RL::InitRL(std::string robot_path)
     // init model
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/" + this->params.model_name;
     this->model = torch::jit::load(model_path);
+
+    std::string head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/lite3/pie/head_1.pt";
+    this->puff_head = torch::jit::load(head_path);
+    std::string backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/lite3/pie/backbone_1.pt";
+    this->puff_backbone = torch::jit::load(backbone_path);
 }
 
 void RL::ComputeOutput(const torch::Tensor &actions, torch::Tensor &output_dof_pos, torch::Tensor &output_dof_vel, torch::Tensor &output_dof_tau)

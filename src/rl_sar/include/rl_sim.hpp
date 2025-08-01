@@ -78,6 +78,15 @@ private:
 
     // ros interface
     std::string ros_namespace;
+
+    //depth
+    int motion_time = 1;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
+    void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr filtered_depth_publisher;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
+    bool no_depth_check_ = false; // Flag for depth image check
+    bool no_depth_forward = false; // Flag for depth image forwarding
 #if defined(USE_ROS1)
     geometry_msgs::Twist vel;
     geometry_msgs::Pose pose;

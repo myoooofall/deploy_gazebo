@@ -144,6 +144,16 @@ RL_Sim::RL_Sim()
         [this] (const robot_msgs::msg::RobotState::SharedPtr msg) {this->RobotStateCallback(msg);}
     );
 
+    this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
+        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        std::bind(&RL_Sim::DepthImageCallback, this, std::placeholders::_1));
+
+    this->filtered_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/camera/depth/filtered", rclcpp::SystemDefaultsQoS());
+    this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
+        depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
+
     // service
     this->gazebo_pause_physics_client = this->create_client<std_srvs::srv::Empty>("/pause_physics");
     this->gazebo_unpause_physics_client = this->create_client<std_srvs::srv::Empty>("/unpause_physics");
@@ -178,7 +188,18 @@ RL_Sim::RL_Sim()
 
     std::cout << LOGGER::INFO << "RL_Sim start" << std::endl;
 }
-
+void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    // 只在每个时间步更新一次深度图
+    if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
+        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
+            this->processed_depth_publisher);
+        // torch::Tensor processed_depth = depth_buffer.process_depth_image_old(msg);
+        depth_buffer.insert(processed_depth.unsqueeze(0));  // 添加batch维度
+        this->motion_time = 1;
+    }
+    this->motion_time++;
+}
 RL_Sim::~RL_Sim()
 {
     this->loop_keyboard->shutdown();
@@ -563,7 +584,15 @@ torch::Tensor RL_Sim::Forward()
     {
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
-        actions = this->model.forward({this->history_obs}).toTensor();
+        // actions = this->model.forward({this->history_obs}).toTensor();
+        torch::Tensor depth_image = depth_buffer.get_depth_vec();
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(this->history_obs);    // [1, 45]
+        std::vector<torch::jit::IValue> vision_inputs;
+        vision_inputs.push_back(depth_image);
+        torch::Tensor vision_tokens = this->puff_head.forward(vision_inputs).toTensor();
+        inputs.push_back(vision_tokens);
+        actions = this->puff_backbone.forward(inputs).toTensor();
     }
     else
     {

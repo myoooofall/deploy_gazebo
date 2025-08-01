@@ -17,6 +17,7 @@
 #include <yaml-cpp/yaml.h>
 #include "fsm_core.hpp"
 #include "observation_buffer.hpp"
+#include "depth_buffer.hpp"
 
 namespace LOGGER
 {
@@ -219,6 +220,7 @@ public:
 
     // history buffer
     ObservationBuffer history_obs_buf;
+    DepthBuffer depth_buffer;
     torch::Tensor history_obs;
 
     // others
@@ -234,6 +236,8 @@ public:
 
     // rl module
     torch::jit::script::Module model;
+    torch::jit::script::Module puff_head;
+    torch::jit::script::Module puff_backbone;
     // output buffer
     torch::Tensor output_dof_tau;
     torch::Tensor output_dof_pos;
