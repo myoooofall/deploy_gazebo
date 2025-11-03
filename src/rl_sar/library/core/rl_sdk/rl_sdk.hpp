@@ -8,6 +8,7 @@
 
 #include <torch/script.h>
 #include <iostream>
+#include <cmath>
 #include <string>
 #include <exception>
 #include <unistd.h>
@@ -163,6 +164,8 @@ struct Observations
     torch::Tensor gravity_vec;
     torch::Tensor commands;
     torch::Tensor base_quat;
+    torch::Tensor attitude;  // [roll, pitch] in radians
+    torch::Tensor yaw_angle;  // [sin(yaw), cos(yaw)]
     torch::Tensor dof_pos;
     torch::Tensor dof_vel;
     torch::Tensor actions;
@@ -238,6 +241,8 @@ public:
     torch::jit::script::Module model;
     torch::jit::script::Module puff_head;
     torch::jit::script::Module puff_backbone;
+    torch::jit::script::Module vision_head;
+    torch::jit::script::Module vision_backbone;
     // output buffer
     torch::Tensor output_dof_tau;
     torch::Tensor output_dof_pos;

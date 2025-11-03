@@ -45,6 +45,10 @@ torch::Tensor RL::ComputeObservation()
         {
             obs_list.push_back(this->QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec));
         }
+        else if (observation == "yaw_angle")
+        {
+            obs_list.push_back(this->obs.yaw_angle);
+        }
         else if (observation == "commands")
         {
             obs_list.push_back(this->obs.commands * this->params.commands_scale);
@@ -119,6 +123,8 @@ void RL::InitObservations()
     this->obs.gravity_vec = torch::tensor({{0.0, 0.0, -1.0}});
     this->obs.commands = torch::tensor({{0.0, 0.0, 0.0}});
     this->obs.base_quat = torch::tensor({{0.0, 0.0, 0.0, 1.0}});
+    this->obs.attitude = torch::tensor({{0.0, 0.0}});  // [roll, pitch]
+    this->obs.yaw_angle = torch::tensor({{0.0, 0.0}});  // [sin(yaw), cos(yaw)], initialized to [1.0, 0.0]
     this->obs.dof_pos = this->params.default_dof_pos;
     this->obs.dof_vel = torch::zeros({1, this->params.num_of_dofs});
     this->obs.actions = torch::zeros({1, this->params.num_of_dofs});
@@ -168,10 +174,10 @@ void RL::InitRL(std::string robot_path)
     std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/" + this->params.model_name;
     this->model = torch::jit::load(model_path);
 
-    std::string head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/lite3/pie/head_1.pt";
-    this->puff_head = torch::jit::load(head_path);
-    std::string backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/lite3/pie/backbone_1.pt";
-    this->puff_backbone = torch::jit::load(backbone_path);
+    std::string vision_head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/vision_weight.pt";
+    this->vision_head = torch::jit::load(vision_head_path);
+    std::string vision_backbone_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/base_jit.pt";
+    this->vision_backbone = torch::jit::load(vision_backbone_path);
 }
 
 void RL::ComputeOutput(const torch::Tensor &actions, torch::Tensor &output_dof_pos, torch::Tensor &output_dof_vel, torch::Tensor &output_dof_tau)

@@ -152,7 +152,7 @@ RL_Sim::RL_Sim()
         "/camera/camera/depth/filtered", rclcpp::SystemDefaultsQoS());
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-        depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史
+        depth_buffer = DepthBuffer(1, 58, 87, 2);  // 1个环境，2帧历史 (height=58, width=87)
 
     // service
     this->gazebo_pause_physics_client = this->create_client<std_srvs::srv::Empty>("/pause_physics");
@@ -585,14 +585,39 @@ torch::Tensor RL_Sim::Forward()
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
         // actions = this->model.forward({this->history_obs}).toTensor();
-        torch::Tensor depth_image = depth_buffer.get_depth_vec();
-        std::vector<torch::jit::IValue> inputs;
-        inputs.push_back(this->history_obs);    // [1, 45]
+        
+        // Create obs_student by masking yaw (similar to Python: obs_student = obs[:, :n_proprio].clone(); obs_student[:, 6:8] = 0)
+        torch::Tensor obs_student = clamped_obs.clone();
+        obs_student.index({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}) = 0.0;  // Mask yaw
+        
+        // Get depth image and pass through vision_head with current frame obs_student
+        // depth_buf shape: [num_envs, history_steps, height, width] = [1, 2, 58, 87]
+        // Extract the latest frame: select history=-1 to get [1, 58, 87]
+        torch::Tensor depth_buf_full = depth_buffer.get_depth_vec();
+        torch::Tensor depth_image = depth_buf_full.select(1, -1);  // [1, 58, 87] (select history dim=1 at index -1)
         std::vector<torch::jit::IValue> vision_inputs;
         vision_inputs.push_back(depth_image);
-        torch::Tensor vision_tokens = this->puff_head.forward(vision_inputs).toTensor();
-        inputs.push_back(vision_tokens);
-        actions = this->puff_backbone.forward(inputs).toTensor();
+        vision_inputs.push_back(obs_student);
+        torch::Tensor depth_latent_and_yaw = this->vision_head.forward(vision_inputs).toTensor();
+        
+        // Split depth_latent and yaw
+        torch::Tensor depth_latent = depth_latent_and_yaw.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, -2)});  // [1, 32]
+        torch::Tensor yaw = depth_latent_and_yaw.index({torch::indexing::Slice(), torch::indexing::Slice(-2, torch::indexing::None)});  // [1, 2]
+        
+        // Replace yaw in clamped_obs (current frame obs)
+        clamped_obs.index({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}) = 1.5 * yaw;
+        
+        // Create full obs for backbone: current_obs + heights(131) + priv_explicit(9) + priv_latent(37) + history
+        torch::Tensor heights = torch::zeros({1, 131});  // Height measurements
+        torch::Tensor priv_explicit = torch::zeros({1, 9});  // Privileged explicit
+        torch::Tensor priv_latent = torch::zeros({1, 37});  // Privileged latent
+        torch::Tensor full_obs = torch::cat({clamped_obs, heights, priv_explicit, priv_latent, this->history_obs}, 1);
+        
+        // Forward through vision_backbone with full obs and depth_latent
+        std::vector<torch::jit::IValue> backbone_inputs;
+        backbone_inputs.push_back(full_obs);
+        backbone_inputs.push_back(depth_latent);
+        actions = this->vision_backbone.forward(backbone_inputs).toTensor();
     }
     else
     {

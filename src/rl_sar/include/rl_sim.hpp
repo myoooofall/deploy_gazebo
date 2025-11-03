@@ -15,6 +15,7 @@
 #include "fsm.hpp"
 
 #include <csignal>
+#include <cmath>
 #include <vector>
 #include <string>
 #include <cstdlib>

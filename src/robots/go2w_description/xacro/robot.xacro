@@ -4,5 +4,5 @@
 
     <xacro:include filename="$(find go2w_description)/urdf/go2w_description.urdf"/>
     <xacro:include filename="$(find go2w_description)/xacro/gazebo.xacro"/>
-
+    
 </robot>

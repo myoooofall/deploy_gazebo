@@ -5,7 +5,6 @@
 #include <vector>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/msg/image.hpp>
-#include <rclcpp/logging.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <opencv2/opencv.hpp>
 class DepthBuffer

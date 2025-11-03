@@ -74,7 +74,7 @@ if(NOT USE_CMAKE)
     find_package(gazebo REQUIRED)
 endif()
 
-set(Torch_DIR /home/lingmisaki/Documents/libtorch/share/cmake/Torch)
+set(Torch_DIR /home/teleai/Desktop/liangwang_ws/libtorch/share/cmake/Torch)
 find_package(Torch REQUIRED)
 find_package(TBB REQUIRED)
 find_package(Threads REQUIRED)
@@ -172,6 +172,8 @@ target_link_libraries(rl_sdk PUBLIC
 )
 ament_target_dependencies(rl_sdk PUBLIC
         cv_bridge
+        rclcpp
+        sensor_msgs
     )
 find_package(Python3 COMPONENTS NumPy)
 if(Python3_NumPy_FOUND)
@@ -229,7 +231,9 @@ if(NOT USE_CMAKE)
         install(TARGETS rl_sim DESTINATION lib/${PROJECT_NAME})
     endif()
 endif()
-
+set(dependencies
+    rclcpp
+)
 add_executable(rl_real_a1 src/rl_real_a1.cpp)
 target_link_libraries(rl_real_a1
     ${UNITREE_A1_LIBS}
