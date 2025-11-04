@@ -118,15 +118,18 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
         int height = depth_tensor.sizes()[2]; // Assuming HxW
         int width = depth_tensor.sizes()[3]; // Assuming HxW
         cv::Mat depth_mat(height, width, CV_32FC1, depth_tensor.data_ptr<float>());
-        // cv::imshow("Processed Depth Image", depth_mat);
-        // cv::waitKey(1);  // Wait for a short time to display the image
-
+        
+        // 反归一化深度值用于显示: 从 -0.5~0.5 映射回 0.2~2.0 米
+        // depth_normalized = (depth_m - 1) / 2
+        // depth_m = 2 * depth_normalized + 1
+        cv::Mat depth_meters = 2.0 * depth_mat + 1.0;  // 反归一化到 0.2~2.0 米范围
+        
         cv::Mat depth_uint16_mat;
         // 将浮点深度值转换为毫米，并转换为 CV_16UC1 (unsigned short)
-        // 假设最大深度为 10米，即 10000毫米
-        // 可以根据实际传感器范围调整缩放因子
-        depth_mat.convertTo(depth_uint16_mat, CV_16UC1, 1000.0); // 乘以1000将米转换为毫米
-        auto image_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono16", depth_uint16_mat).toImageMsg();
+        // 范围是 0.2~2.0 米，即 200~2000 毫米
+        depth_meters.convertTo(depth_uint16_mat, CV_16UC1, 1000.0); // 乘以1000将米转换为毫米
+        
+        auto image_msg = cv_bridge::CvImage(msg->header, "mono16", depth_uint16_mat).toImageMsg();
         processed_publisher->publish(*image_msg);
     }
     return depth_tensor.squeeze(0).squeeze(0);  // 移除batch和channel维度

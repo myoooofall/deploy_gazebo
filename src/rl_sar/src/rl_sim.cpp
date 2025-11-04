@@ -191,7 +191,7 @@ RL_Sim::RL_Sim()
 void RL_Sim::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     // 只在每个时间步更新一次深度图
-    if (this->motiontime % 5 == 0) {  // 每5个时间步更新一次
+    if (this->motion_time % 5 == 0) {  // 每5个时间步更新一次
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
             this->processed_depth_publisher);
         // torch::Tensor processed_depth = depth_buffer.process_depth_image_old(msg);
@@ -248,6 +248,22 @@ void RL_Sim::StartJointController(const std::string& ros_namespace, const std::v
         }
     }
 
+    // First, try to unload the controller if it already exists (using unspawner)
+    pid_t pid_unload = fork();
+    if (pid_unload == 0)
+    {
+        std::string unload_cmd = "ros2 run controller_manager unspawner robot_joint_controller 2>/dev/null || true";
+        execlp("sh", "sh", "-c", unload_cmd.c_str(), nullptr);
+        exit(0);
+    }
+    else if (pid_unload > 0)
+    {
+        int status;
+        waitpid(pid_unload, &status, 0);  // Ignore errors from unload
+        usleep(100000);  // Small delay (100ms) to ensure cleanup
+    }
+
+    // Now load the controller
     pid_t pid = fork();
     if (pid == 0)
     {
