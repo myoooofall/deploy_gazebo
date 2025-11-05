@@ -25,6 +25,7 @@ private:
     int width;
     int include_history_steps;
     torch::Tensor depth_buf;
+    bool initialized = false;  // 标记是否已经初始化（第一次插入）
 };
 
 #endif // DEPTH_BUFFER_HPP

@@ -23,16 +23,29 @@ void DepthBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_depth)
         indices.push_back(torch::indexing::Slice(idx));
     }
     depth_buf.index_put_(indices, new_depth.repeat({1, include_history_steps, 1, 1}));
+    // reset后，如果所有环境都被reset，则重置initialized标志
+    // 这里简化处理：reset后保持initialized状态，因为buffer已经被填充了
 }
 
 void DepthBuffer::insert(torch::Tensor new_depth)
 {
-    // Shift observations back.
-    torch::Tensor shifted_depth = depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(include_history_steps - 1, torch::indexing::None), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}).clone();
-    depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, include_history_steps - 1), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = shifted_depth;
+    if (!initialized) {
+        // 第一次插入：用第一帧复制满整个buffer
+        // new_depth shape: [1, height, width] (已经有batch维度)
+        // depth_buf shape: [num_envs, include_history_steps, height, width]
+        for (int i = 0; i < include_history_steps; ++i) {
+            depth_buf.index({torch::indexing::Slice(torch::indexing::None), i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+        }
+        initialized = true;
+    } else {
+        // 后续插入：正常的shift逻辑
+        // Shift observations back.
+        torch::Tensor shifted_depth = depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(include_history_steps - 1, torch::indexing::None), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}).clone();
+        depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, include_history_steps - 1), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = shifted_depth;
 
-    // Add new observation.
-    depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(-1), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+        // Add new observation.
+        depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(-1), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+    }
 }
 
 torch::Tensor DepthBuffer::get_depth_vec()

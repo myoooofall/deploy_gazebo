@@ -596,13 +596,29 @@ torch::Tensor RL_Sim::Forward()
     torch::Tensor actions;
     if (this->params.observations_history.size() != 0)
     {
+        // 打印 clamped_obs
+        static int debug_count = 0;
+        if (debug_count < 3) {
+            std::cout << "\n========== [DEBUG " << debug_count << "] Forward() Input Values ==========" << std::endl;
+            std::cout << "1. clamped_obs:" << std::endl;
+            std::cout << "   Shape: [" << clamped_obs.size(0) << ", " << clamped_obs.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << clamped_obs << std::endl;
+            std::cout << "   Min: " << clamped_obs.min().item<float>() << ", Max: " << clamped_obs.max().item<float>() << ", Mean: " << clamped_obs.mean().item<float>() << std::endl;
+        }
+        
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
-        // actions = this->model.forward({this->history_obs}).toTensor();
         
         // Create obs_student by masking yaw (similar to Python: obs_student = obs[:, :n_proprio].clone(); obs_student[:, 6:8] = 0)
         torch::Tensor obs_student = clamped_obs.clone();
         obs_student.index({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}) = 0.0;  // Mask yaw
+        
+        if (debug_count < 3) {
+            std::cout << "\n2. obs_student (after masking yaw at indices 6:8):" << std::endl;
+            std::cout << "   Shape: [" << obs_student.size(0) << ", " << obs_student.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << obs_student << std::endl;
+            std::cout << "   Indices 6-7 (yaw): [" << obs_student.index({0, 6}).item<float>() << ", " << obs_student.index({0, 7}).item<float>() << "]" << std::endl;
+        }
         
         // Get depth image and pass through vision_head with current frame obs_student
         // depth_buf shape: [num_envs, history_steps, height, width] = [1, 2, 58, 87]
@@ -610,6 +626,14 @@ torch::Tensor RL_Sim::Forward()
         // Extract the head (index 0) for inference
         torch::Tensor depth_buf_full = depth_buffer.get_depth_vec();
         torch::Tensor depth_image = depth_buf_full.select(1, 0);  // [1, 58, 87] (select history dim=1 at index 0, which is the head/oldest frame)
+        
+        if (debug_count < 3) {
+            std::cout << "\n3. depth_image:" << std::endl;
+            std::cout << "   Shape: [" << depth_image.size(0) << ", " << depth_image.size(1) << ", " << depth_image.size(2) << "]" << std::endl;
+            std::cout << "   Min: " << depth_image.min().item<float>() << ", Max: " << depth_image.max().item<float>() << ", Mean: " << depth_image.mean().item<float>() << std::endl;
+            std::cout << "   Sample values (first 5x5): " << depth_image.index({0, torch::indexing::Slice(0, 5), torch::indexing::Slice(0, 5)}) << std::endl;
+        }
+        
         std::vector<torch::jit::IValue> vision_inputs;
         vision_inputs.push_back(depth_image);
         vision_inputs.push_back(obs_student);
@@ -619,20 +643,30 @@ torch::Tensor RL_Sim::Forward()
         torch::Tensor depth_latent = depth_latent_and_yaw.index({torch::indexing::Slice(), torch::indexing::Slice(torch::indexing::None, -2)});  // [1, 32]
         torch::Tensor yaw = depth_latent_and_yaw.index({torch::indexing::Slice(), torch::indexing::Slice(-2, torch::indexing::None)});  // [1, 2]
         
-        // Print vision head output dimensions (only first time)
-        static bool printed_vision_debug = false;
-        if (!printed_vision_debug) {
-            std::cout << "[DEBUG] Vision head output:" << std::endl;
-            std::cout << "  depth_image: [" << depth_image.size(0) << ", " << depth_image.size(1) << ", " << depth_image.size(2) << "]" << std::endl;
-            std::cout << "  obs_student: [" << obs_student.size(0) << ", " << obs_student.size(1) << "]" << std::endl;
-            std::cout << "  depth_latent_and_yaw: [" << depth_latent_and_yaw.size(0) << ", " << depth_latent_and_yaw.size(1) << "]" << std::endl;
-            std::cout << "  depth_latent: [" << depth_latent.size(0) << ", " << depth_latent.size(1) << "]" << std::endl;
-            std::cout << "  yaw: [" << yaw.size(0) << ", " << yaw.size(1) << "]" << std::endl;
-            printed_vision_debug = true;
+        if (debug_count < 3) {
+            std::cout << "\n4. depth_latent_and_yaw (vision_head output):" << std::endl;
+            std::cout << "   Shape: [" << depth_latent_and_yaw.size(0) << ", " << depth_latent_and_yaw.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << depth_latent_and_yaw << std::endl;
+            std::cout << "   Min: " << depth_latent_and_yaw.min().item<float>() << ", Max: " << depth_latent_and_yaw.max().item<float>() << ", Mean: " << depth_latent_and_yaw.mean().item<float>() << std::endl;
+            
+            std::cout << "\n5. depth_latent (first 32 elements):" << std::endl;
+            std::cout << "   Shape: [" << depth_latent.size(0) << ", " << depth_latent.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << depth_latent << std::endl;
+            
+            std::cout << "\n6. yaw (last 2 elements):" << std::endl;
+            std::cout << "   Shape: [" << yaw.size(0) << ", " << yaw.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << yaw << std::endl;
         }
         
         // Replace yaw in clamped_obs (current frame obs)
         clamped_obs.index({torch::indexing::Slice(), torch::indexing::Slice(6, 8)}) = 1.5 * yaw;
+        
+        if (debug_count < 3) {
+            std::cout << "\n7. clamped_obs (after replacing yaw with 1.5 * yaw):" << std::endl;
+            std::cout << "   Shape: [" << clamped_obs.size(0) << ", " << clamped_obs.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << clamped_obs << std::endl;
+            std::cout << "   Indices 6-7 (new yaw): [" << clamped_obs.index({0, 6}).item<float>() << ", " << clamped_obs.index({0, 7}).item<float>() << "]" << std::endl;
+        }
         
         // Create full obs for backbone: current_obs + heights(131) + priv_explicit(9) + priv_latent(37) + history
         torch::Tensor heights = torch::zeros({1, 131});  // Height measurements
@@ -640,18 +674,37 @@ torch::Tensor RL_Sim::Forward()
         torch::Tensor priv_latent = torch::zeros({1, 37});  // Privileged latent
         torch::Tensor full_obs = torch::cat({clamped_obs, heights, priv_explicit, priv_latent, this->history_obs}, 1);
         
-        // Print dimensions for debugging (only first time)
-        static bool printed_fullobs_debug = false;
-        if (!printed_fullobs_debug) {
-            std::cout << "[DEBUG] full_obs dimensions breakdown:" << std::endl;
-            std::cout << "  clamped_obs: [" << clamped_obs.size(0) << ", " << clamped_obs.size(1) << "]" << std::endl;
-            std::cout << "  heights: [" << heights.size(0) << ", " << heights.size(1) << "]" << std::endl;
-            std::cout << "  priv_explicit: [" << priv_explicit.size(0) << ", " << priv_explicit.size(1) << "]" << std::endl;
-            std::cout << "  priv_latent: [" << priv_latent.size(0) << ", " << priv_latent.size(1) << "]" << std::endl;
-            std::cout << "  history_obs: [" << this->history_obs.size(0) << ", " << this->history_obs.size(1) << "]" << std::endl;
-            std::cout << "  full_obs: [" << full_obs.size(0) << ", " << full_obs.size(1) << "]" << std::endl;
-            std::cout << "  Expected total: " << clamped_obs.size(1) + heights.size(1) + priv_explicit.size(1) + priv_latent.size(1) + this->history_obs.size(1) << std::endl;
-            printed_fullobs_debug = true;
+        if (debug_count < 3) {
+            std::cout << "\n8. heights:" << std::endl;
+            std::cout << "   Shape: [" << heights.size(0) << ", " << heights.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << heights << std::endl;
+            
+            std::cout << "\n9. priv_explicit:" << std::endl;
+            std::cout << "   Shape: [" << priv_explicit.size(0) << ", " << priv_explicit.size(1) << "]" << std::endl;
+            std::cout << "   Values: " << priv_explicit << std::endl;
+            
+            std::cout << "\n10. priv_latent:" << std::endl;
+            std::cout << "    Shape: [" << priv_latent.size(0) << ", " << priv_latent.size(1) << "]" << std::endl;
+            std::cout << "    Values: " << priv_latent << std::endl;
+            
+            std::cout << "\n11. history_obs:" << std::endl;
+            std::cout << "    Shape: [" << this->history_obs.size(0) << ", " << this->history_obs.size(1) << "]" << std::endl;
+            std::cout << "    Values: " << this->history_obs << std::endl;
+            std::cout << "    Min: " << this->history_obs.min().item<float>() << ", Max: " << this->history_obs.max().item<float>() << ", Mean: " << this->history_obs.mean().item<float>() << std::endl;
+            
+            std::cout << "\n12. full_obs (concatenated):" << std::endl;
+            std::cout << "    Shape: [" << full_obs.size(0) << ", " << full_obs.size(1) << "]" << std::endl;
+            std::cout << "    Expected total: " << clamped_obs.size(1) + heights.size(1) + priv_explicit.size(1) + priv_latent.size(1) + this->history_obs.size(1) << std::endl;
+            std::cout << "    First 20 values: " << full_obs.index({0, torch::indexing::Slice(0, 20)}) << std::endl;
+            std::cout << "    Last 20 values: " << full_obs.index({0, torch::indexing::Slice(-20, torch::indexing::None)}) << std::endl;
+            std::cout << "    Min: " << full_obs.min().item<float>() << ", Max: " << full_obs.max().item<float>() << ", Mean: " << full_obs.mean().item<float>() << std::endl;
+            
+            std::cout << "\n13. depth_latent (for backbone):" << std::endl;
+            std::cout << "    Shape: [" << depth_latent.size(0) << ", " << depth_latent.size(1) << "]" << std::endl;
+            std::cout << "    Values: " << depth_latent << std::endl;
+            
+            std::cout << "========== End DEBUG " << debug_count << " ==========\n" << std::endl;
+            debug_count++;
         }
         
         // Forward through vision_backbone with full obs and depth_latent
@@ -659,6 +712,15 @@ torch::Tensor RL_Sim::Forward()
         backbone_inputs.push_back(full_obs);
         backbone_inputs.push_back(depth_latent);
         actions = this->vision_backbone.forward(backbone_inputs).toTensor();
+        
+        static int debug_action_count = 0;
+        if (debug_action_count < 3) {
+            std::cout << "\n14. actions (vision_backbone output):" << std::endl;
+            std::cout << "    Shape: [" << actions.size(0) << ", " << actions.size(1) << "]" << std::endl;
+            std::cout << "    Values: " << actions << std::endl;
+            std::cout << "    Min: " << actions.min().item<float>() << ", Max: " << actions.max().item<float>() << ", Mean: " << actions.mean().item<float>() << std::endl;
+            debug_action_count++;
+        }
         
     }
     else

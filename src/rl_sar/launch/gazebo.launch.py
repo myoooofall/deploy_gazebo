@@ -14,7 +14,7 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     rname = LaunchConfiguration("rname")
 
-    wname = "stairs"
+    wname = "platforms"
     robot_name = ParameterValue(Command(["echo -n ", rname]), value_type=str)
     ros_namespace = ParameterValue(Command(["echo -n ", "/", rname, "_gazebo"]), value_type=str)
     gazebo_model_name = ParameterValue(Command(["echo -n ", rname, "_gazebo"]), value_type=str)

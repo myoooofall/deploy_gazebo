@@ -37,16 +37,29 @@ void ObservationBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_obs
         indices.push_back(torch::indexing::Slice(idx));
     }
     obs_buf.index_put_(indices, new_obs.repeat({1, history_length}));
+    // reset后，如果所有环境都被reset，则重置initialized标志
+    // 这里简化处理：reset后保持initialized状态，因为buffer已经被填充了
 }
 
 void ObservationBuffer::insert(torch::Tensor new_obs)
 {
-    // Shift observations back.
-    torch::Tensor shifted_obs = obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(num_obs, num_obs * history_length)}).clone();
-    obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, num_obs * (history_length - 1))}) = shifted_obs;
+    if (!initialized) {
+        // 第一次插入：用第一帧复制满整个buffer
+        // new_obs shape: [num_envs, num_obs]
+        // obs_buf shape: [num_envs, num_obs * history_length]
+        for (int i = 0; i < history_length; ++i) {
+            obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(i * num_obs, (i + 1) * num_obs)}) = new_obs;
+        }
+        initialized = true;
+    } else {
+        // 后续插入：正常的shift逻辑
+        // Shift observations back.
+        torch::Tensor shifted_obs = obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(num_obs, num_obs * history_length)}).clone();
+        obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, num_obs * (history_length - 1))}) = shifted_obs;
 
-    // Add new observation.
-    obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(-num_obs, torch::indexing::None)}) = new_obs;
+        // Add new observation.
+        obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(-num_obs, torch::indexing::None)}) = new_obs;
+    }
 }
 
 /**

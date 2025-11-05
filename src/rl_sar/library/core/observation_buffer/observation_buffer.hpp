@@ -27,6 +27,7 @@ private:
     int history_length = 0;
     int num_obs_total = 0;
     torch::Tensor obs_buf;
+    bool initialized = false;  // 标记是否已经初始化（第一次插入）
 };
 
 #endif // OBSERVATION_BUFFER_HPP
