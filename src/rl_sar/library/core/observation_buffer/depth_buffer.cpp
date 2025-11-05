@@ -95,12 +95,6 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     // // 将深度值裁剪到0.2-2.0米范围
     depth_tensor = torch::clamp(depth_tensor, 0.2, 2.0);
     
-    // 归一化到-0.5到0.5范围 (normalize before resize in Python)
-    depth_tensor = (depth_tensor - 1) / 2;  // (x - 1) / 2 将0.2-2.0映射到-0.5-0.5
-    
-    // // 打印转换为米后的范围
-    // std::cout << "转换为米后的范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
-    
     // Final resize to target size (58, 87) - similar to Python resize_transform
     depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // Add batch and channel dims again for interpolate
     depth_tensor = torch::nn::functional::interpolate(
@@ -111,26 +105,30 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
             .align_corners(false)
     );
     
-    // 打印调整后的深度值范围
-    // std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
+    // 发布用于可视化的深度图（在归一化之前保存原始值）
     if (processed_publisher) {
+        // 确保tensor是连续的，以便正确创建cv::Mat
+        torch::Tensor processed_tensor = depth_tensor.contiguous();
+        
         // Get dimensions
-        int height = depth_tensor.sizes()[2]; // Assuming HxW
-        int width = depth_tensor.sizes()[3]; // Assuming HxW
-        cv::Mat depth_mat(height, width, CV_32FC1, depth_tensor.data_ptr<float>());
+        int height = processed_tensor.sizes()[2]; // Assuming HxW
+        int width = processed_tensor.sizes()[3]; // Assuming HxW
         
-        // 反归一化深度值用于显示: 从 -0.5~0.5 映射回 0.2~2.0 米
-        // depth_normalized = (depth_m - 1) / 2
-        // depth_m = 2 * depth_normalized + 1
-        cv::Mat depth_meters = 2.0 * depth_mat + 1.0;  // 反归一化到 0.2~2.0 米范围
+        // 创建cv::Mat，此时数据是实际的深度值（0.2~2.0米）
+        // 使用32FC1格式（32位浮点数），单位米，无需转换
+        cv::Mat depth_mat(height, width, CV_32FC1, processed_tensor.data_ptr<float>());
         
-        cv::Mat depth_uint16_mat;
-        // 将浮点深度值转换为毫米，并转换为 CV_16UC1 (unsigned short)
-        // 范围是 0.2~2.0 米，即 200~2000 毫米
-        depth_meters.convertTo(depth_uint16_mat, CV_16UC1, 1000.0); // 乘以1000将米转换为毫米
-        
-        auto image_msg = cv_bridge::CvImage(msg->header, "mono16", depth_uint16_mat).toImageMsg();
+        // 使用32FC1编码发布，单位是米，rqt可以正确处理
+        // 如果使用mono16（16UC1），需要转换为毫米：depth_mat.convertTo(depth_uint16_mat, CV_16UC1, 1000.0);
+        auto image_msg = cv_bridge::CvImage(msg->header, "32FC1", depth_mat).toImageMsg();
         processed_publisher->publish(*image_msg);
     }
+    
+    // 归一化到-0.5到0.5范围 (用于推理)
+    // depth_normalized = (depth_m - 1) / 2 将0.2-2.0映射到-0.5-0.5
+    depth_tensor = (depth_tensor - 1.0) / 2.0;
+    
+    // 打印调整后的深度值范围
+    // std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
     return depth_tensor.squeeze(0).squeeze(0);  // 移除batch和channel维度
 }

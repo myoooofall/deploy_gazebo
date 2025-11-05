@@ -1,8 +1,8 @@
 go2w/parkour:
   model_name: "base_jit.pt"
   num_observations: 59
-  observations: ["ang_vel", "gravity_vec", "yaw_angle", "commands", "dof_pos", "dof_vel", "actions"]
-  observations_history: [9,8,7,6,5,4,3,2,1,0]  # 0 is the latest observation
+  observations: ["ang_vel", "gravity_vec", "commands", "dof_pos", "dof_vel", "actions"]
+  observations_history: []  # 0 is the latest observation
   observations_history_priority: "time"  # "time" or "term" priority
   clip_obs: 100.0
   clip_actions_lower: [-100.0, -100.0, -100.0,
@@ -15,15 +15,15 @@ go2w/parkour:
                        100.0, 100.0, 100.0,
                        100.0, 100.0, 100.0,
                        100.0, 100.0, 100.0, 100.0]
-  rl_kp: [20.0, 20.0, 20.0,
-          20.0, 20.0, 20.0,
-          20.0, 20.0, 20.0,
-          20.0, 20.0, 20.0,
+  rl_kp: [50.0, 50.0, 50.0,
+          50.0, 50.0, 50.0,
+          50.0, 50.0, 50.0,
+          50.0, 50.0, 50.0,
           0.0, 0.0, 0.0, 0.0]
-  rl_kd: [0.5, 0.5, 0.5,
-          0.5, 0.5, 0.5,
-          0.5, 0.5, 0.5,
-          0.5, 0.5, 0.5,
+  rl_kd: [1.0, 1.0, 1.0,
+          1.0, 1.0, 1.0,
+          1.0, 1.0, 1.0,
+          1.0, 1.0, 1.0,
           0.5, 0.5, 0.5, 0.5]  # TODO
   fixed_kp: [70.0, 70.0, 70.0,
              70.0, 70.0, 70.0,
@@ -36,11 +36,11 @@ go2w/parkour:
              5.0, 5.0, 5.0,
              0.5, 0.5, 0.5, 0.5]
   num_of_dofs: 16
-  action_scale: [0.125, 0.25, 0.25,
-                 0.125, 0.25, 0.25,
-                 0.125, 0.25, 0.25,
-                 0.125, 0.25, 0.25,
-                 5.0, 5.0, 5.0, 5.0]
+  action_scale: [0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25,
+                 10.0, 10.0, 10.0, 10.0]
   wheel_indices: [12, 13, 14, 15]
   lin_vel_scale: 2.0
   ang_vel_scale: 0.25

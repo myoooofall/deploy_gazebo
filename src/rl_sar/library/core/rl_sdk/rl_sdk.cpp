@@ -171,7 +171,7 @@ void RL::InitRL(std::string robot_path)
     }
 
     // init model
-    std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/" + this->params.model_name;
+    std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" +"go2w/" + "robot_lab" + "/" + "policy.pt";
     this->model = torch::jit::load(model_path);
 
     std::string vision_head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/vision_weight.pt";
@@ -193,7 +193,7 @@ void RL::ComputeOutput(const torch::Tensor &actions, torch::Tensor &output_dof_p
     torch::Tensor all_actions_scaled = pos_actions_scaled + vel_actions_scaled;
     output_dof_pos = pos_actions_scaled + this->params.default_dof_pos;
     output_dof_vel = vel_actions_scaled;
-    output_dof_tau = this->params.rl_kp * (all_actions_scaled + this->params.default_dof_pos - this->obs.dof_pos) - this->params.rl_kd * this->obs.dof_vel;
+    output_dof_tau = this->params.rl_kp * (all_actions_scaled + this->params.default_dof_pos - this->obs.dof_pos) + this->params.rl_kd * (vel_actions_scaled - this->obs.dof_vel);
     output_dof_tau = torch::clamp(output_dof_tau, -(this->params.torque_limits), this->params.torque_limits);
 }
 
