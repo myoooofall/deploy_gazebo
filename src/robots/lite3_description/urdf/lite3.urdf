@@ -1,57 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?> 
 <robot name="Lite3"> 
   <link name="TORSO"> 
-    <visual> 
+ <visual> 
       <origin rpy="0 0 3.14159265359" xyz="-0.05 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/Lite3.dae" />
       </geometry>
     </visual>
     <collision>
+      <origin xyz="0.05 0 0.01894" rpy="0 0 0"/>
       <geometry>
-        <box size="0.42 0.12 0.08"/>
+        <box size="0.44 0.12 0.09786"/>
       </geometry>
     </collision>
   </link>
 
   <link name="INERTIA">
     <inertial>
-      <origin xyz="0.004 -0.000663 0.002069" />
-      <mass value="7.530" />
-      <inertia ixx="0.016982120" ixy="2.1294E-05" ixz="6.0763E-05" iyy="0.030466501" iyz="1.7968E-05" izz="0.042609956" />
+      <mass value="6.16956" />
+      <inertia ixx="0.03098" ixy="0" ixz="0" iyy="0.06783" iyz="0" izz="0.07747" />
     </inertial>
+
   </link>
 
-  <joint name="Torso2Inertia" type="fixed">
+  <joint name="Torso2Inertia" type="fixed" dont_collapse="true">
     <parent link="TORSO" />
     <child link="INERTIA" />
   </joint>
 
-  <!-- <link name="MODULE">
+  <link name="MODULE">
     <inertial>
-      <origin xyz="0.0 0.0 0.0" />
+      <origin xyz="0.06 0.0 0.09319" />
       <mass value="0.8835" />
     </inertial>
     <collision>
+      <origin xyz="0.06 0 0.09319" />
       <geometry>
-        <box size="0.25 0.1 0.04"/>
+        <box size="0.4 0.12 0.05064"/>
       </geometry>
     </collision>
-  </link> -->
+  </link>
 
-  <!-- <joint name="Torso2MODULE" type="fixed">
-    <origin xyz="0.08 0 0.06" />
+  <joint name="Torso2MODULE" type="fixed" dont_collapse="true">
     <parent link="TORSO" />
     <child link="MODULE" />
-  </joint> -->
+  </joint>
 
   <link name="FL_HIP">
     <inertial>
-      <origin xyz="-0.0047 0.0091 -0.0018" />
-      <mass value="0.428" />
-      <inertia ixx="0.00014538" ixy="-8.1551E-07" ixz="-1.2639E-05" iyy="0.00024024" iyz="-1.3441E-06" izz="0.00013038" />
+      <origin xyz="-0.010579 0.011358 0.00048546" rpy="0 0 0" />
+      <mass value="0.550" />
+      <inertia ixx="0.0004472" ixy="0" ixz="0" iyy="0.0004028" iyz="0" izz="0.0003949" />
     </inertial>
-    <visual>
+<visual>
       <origin rpy="0 0 0" xyz="-0.05 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/FL_HIP.dae" />
@@ -60,7 +61,7 @@
   </link>
 
   <joint name="FL_HipX_joint" type="revolute">
-    <origin xyz="0.1245 -0.062 0" />
+    <origin xyz="0.1745 -0.062 0" />
     <parent link="TORSO" />
     <child link="FL_HIP" />
     <axis xyz="1 0 0" />
@@ -69,11 +70,11 @@
 
   <link name="FL_THIGH">
     <inertial>
-      <origin xyz="-0.00523 0.0216 -0.0273" />
-      <mass value="0.61" />
-      <inertia ixx="0.001" ixy="2.5E-06" ixz="-1.12E-04" iyy="0.00116" iyz="-3.75E-07" izz="2.68E-04" />
+      <origin xyz="-0.0039245 0.025256 -0.025146" rpy="0 0 0" />
+      <mass value="0.86" />
+      <inertia ixx="0.005736" ixy="0" ixz="0" iyy="0.004960" iyz="0" izz="0.001436" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="0 0 0" xyz="0.0 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/R_THIGH.dae" />
@@ -82,7 +83,7 @@
     <collision>
       <origin xyz="-0.024 0 -0.1"/>
       <geometry>
-        <box size="0.035 0.035 0.218"/>
+        <box size="0.035 0.035 0.215"/>
       </geometry>
     </collision>
     <collision>
@@ -94,7 +95,7 @@
   </link>
 
   <joint name="FL_HipY_joint" type="revolute">
-    <origin xyz="0 -0.0985 0" />
+    <origin xyz="0 -0.09735 0" />
     <parent link="FL_HIP" />
     <child link="FL_THIGH" />
     <axis xyz="0 1 0" />
@@ -103,11 +104,11 @@
 
   <link name="FL_SHANK">
     <inertial>
-      <origin xyz="0.00585 -8.732E-07 -0.12" />
-      <mass value="0.115" />
-      <inertia ixx="6.68E-04" ixy="-1.24E-08" ixz="6.91E-06" iyy="6.86E-04" iyz="5.65E-09" izz="3.155E-05" />
+      <origin xyz="0.0064794 -1.4558E-06 -0.12157" rpy="0 0 0" />
+      <mass value="0.1729" />
+      <inertia ixx="0.00089039" ixy="0"  ixz="0"  iyy="0.00090672" iyz="0" izz="3.1266E-05" />
     </inertial>
-    <visual>
+<visual>
       <origin rpy="3.14159265359 -1.4 0" xyz="0 0 0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/SHANK.dae" />
@@ -143,18 +144,18 @@
   </link>
 
   <joint name="FL_Ankle" type="fixed" dont_collapse="true">
-    <origin xyz="-0.007 0 -0.21"/>
+    <origin xyz="0 0 -0.21012"/>
     <parent link="FL_SHANK" />
     <child link="FL_FOOT" />
   </joint>
 
   <link name="FR_HIP">
     <inertial>
-      <origin xyz="-0.0047 -0.0091 -0.0018" />
-      <mass value="0.428" />
-      <inertia ixx="0.00014538" ixy="8.1579E-07" ixz="-1.264E-05" iyy="0.00024024" iyz="1.3443E-06" izz="0.00013038" />
+      <origin xyz="-0.00601 -0.0066532 0.00034295" rpy="0 0 0" />
+      <mass value="0.550" />
+      <inertia ixx="0.0003949" ixy="0" ixz="0" iyy="0.0004028" iyz="0" izz="0.0004472" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="0 0 0" xyz="-0.05 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/FR_HIP.dae" />
@@ -163,7 +164,7 @@
   </link>
 
   <joint name="FR_HipX_joint" type="revolute">
-    <origin xyz="0.1245 0.062 0" />
+    <origin xyz="0.1745 0.062 0" />
     <parent link="TORSO" />
     <child link="FR_HIP" />
     <axis xyz="1 0 0" />
@@ -172,11 +173,11 @@
 
   <link name="FR_THIGH">
     <inertial>
-      <origin xyz="-0.00523 -0.0216 -0.0273" />
-      <mass value="0.61" />
-      <inertia ixx="0.001" ixy="-2.5E-06" ixz="-1.12E-04" iyy="0.00116" iyz="3.75E-07" izz="2.68E-04" />
+      <origin xyz="-0.0052817 -0.014632 -0.042672" rpy="0 0 0" />
+      <mass value="0.86" />
+      <inertia ixx="0.005736" ixy="0" ixz="0" iyy="0.004960" iyz="0" izz="0.001436" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="0 0 0" xyz="0.0 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/L_THIGH.dae" />
@@ -185,7 +186,7 @@
     <collision>
       <origin xyz="-0.024 0 -0.1"/>
       <geometry>
-        <box size="0.035 0.035 0.218"/>
+        <box size="0.035 0.035 0.215"/>
       </geometry>
     </collision>
     <collision>
@@ -197,7 +198,7 @@
   </link>
 
   <joint name="FR_HipY_joint" type="revolute">
-    <origin xyz="0 0.0985 0" />
+    <origin xyz="0 0.09735 0" />
     <parent link="FR_HIP" />
     <child link="FR_THIGH" />
     <axis xyz="0 1 0" />
@@ -206,11 +207,11 @@
 
   <link name="FR_SHANK">
     <inertial>
-      <origin xyz="0.00585 -8.732E-07 -0.12" />
-      <mass value="0.115" />
-      <inertia ixx="6.68E-04" ixy="-1.24E-08" ixz="6.91E-06" iyy="6.86E-04" iyz="5.65E-09" izz="3.155E-05" />
+      <origin xyz="0.0064794 -1.4558E-06 -0.12157" rpy="0 0 0" />
+      <mass value="0.1729" />
+      <inertia ixx="0.00089039" ixy="0"  ixz="0"  iyy="0.00090672" iyz="0" izz="3.1266E-05" />
     </inertial>
-    <visual>
+<visual>
       <origin rpy="3.14159265359 -1.4 0" xyz="0 0 0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/SHANK.dae" />
@@ -246,18 +247,18 @@
   </link>
 
   <joint name="FR_Ankle" type="fixed" dont_collapse="true">
-    <origin xyz="-0.007 0 -0.21"/>
+    <origin xyz="0 0 -0.21012"/>
     <parent link="FR_SHANK" />
     <child link="FR_FOOT" />
   </joint>
 
   <link name="HL_HIP">
     <inertial>
-      <origin xyz="0.0047 0.0091 -0.0018" />
-      <mass value="0.428" />
-      <inertia ixx="0.00014538" ixy="8.1545E-07" ixz="1.2639E-05" iyy="0.00024024" iyz="-1.344E-06" izz="0.00013038" />
+      <origin xyz="0.010354 0.011423 0.00049498" rpy="0 0 0" />
+      <mass value="0.550" />
+      <inertia ixx="0.0003949" ixy="0" ixz="0" iyy="0.0004028" iyz="0" izz="0.0004472" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="0 0 0" xyz="0.05 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/HL_HIP.dae" />
@@ -266,7 +267,7 @@
   </link>
 
   <joint name="HL_HipX_joint" type="revolute">
-    <origin xyz="-0.2245 -0.062 0" />
+    <origin xyz="-0.1745 -0.062 0" />
     <parent link="TORSO" />
     <child link="HL_HIP" />
     <axis xyz="1 0 0" />
@@ -275,11 +276,11 @@
 
   <link name="HL_THIGH">
     <inertial>
-      <origin xyz="-0.00523 0.0216 -0.0273" />
-      <mass value="0.61" />
-      <inertia ixx="0.001" ixy="2.5E-06" ixz="-1.12E-04" iyy="0.00116" iyz="-3.75E-07" izz="2.68E-04" />
+      <origin xyz="-0.0031903 0.02526 -0.025617" rpy="0 0 0" />
+      <mass value="0.86" />
+      <inertia ixx="0.005736" ixy="0" ixz="0" iyy="0.004960" iyz="0" izz="0.001436" />
     </inertial>
-    <visual>
+<visual>
       <origin rpy="0 0 0" xyz="0.0 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/R_THIGH.dae" />
@@ -288,7 +289,7 @@
     <collision>
       <origin xyz="-0.024 0 -0.1"/>
       <geometry>
-        <box size="0.035 0.035 0.218"/>
+        <box size="0.035 0.035 0.215"/>
       </geometry>
     </collision>
     <collision>
@@ -300,7 +301,7 @@
   </link>
 
   <joint name="HL_HipY_joint" type="revolute">
-    <origin xyz="0 -0.0985 0" />
+    <origin xyz="0 -0.09735 0" />
     <parent link="HL_HIP" />
     <child link="HL_THIGH" />
     <axis xyz="0 1 0" />
@@ -309,11 +310,11 @@
 
   <link name="HL_SHANK">
     <inertial>
-      <origin xyz="0.00585 -8.732E-07 -0.12" />
-      <mass value="0.115" />
-      <inertia ixx="6.68E-04" ixy="-1.24E-08" ixz="6.91E-06" iyy="6.86E-04" iyz="5.65E-09" izz="3.155E-05" />
+      <origin xyz="0.0064794 -1.4558E-06 -0.12157" rpy="0 0 0" />
+      <mass value="0.1729" />
+      <inertia ixx="0.00089039" ixy="0"  ixz="0"  iyy="0.00090672" iyz="0" izz="3.1266E-05" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="3.14159265359 -1.4 0" xyz="0 0 0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/SHANK.dae" />
@@ -349,18 +350,18 @@
   </link>
 
   <joint name="HL_Ankle" type="fixed" dont_collapse="true">
-    <origin xyz="-0.007 0 -0.21"/>
+    <origin xyz="0 0 -0.21012"/>
     <parent link="HL_SHANK" />
     <child link="HL_FOOT" />
   </joint>
 
   <link name="HR_HIP">
     <inertial>
-      <origin xyz="0.0047 -0.0091 -0.0018" />
-      <mass value="0.428" />
-      <inertia ixx="0.00014538" ixy="-8.1585E-07" ixz="1.2639E-05" iyy="0.00024024" iyz="1.3444E-06" izz="0.00013038" />
+      <origin xyz="0.010905 -0.012636 0.001051" rpy="0 0 0" />
+      <mass value="0.550" />
+      <inertia ixx="0.0003949" ixy="0" ixz="0" iyy="0.0004028" iyz="0" izz="0.0004472" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="0 0 0" xyz="0.05 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/HR_HIP.dae" />
@@ -369,7 +370,7 @@
   </link>
 
   <joint name="HR_HipX_joint" type="revolute">
-    <origin xyz="-0.2245 0.062 0" />
+    <origin xyz="-0.1745 0.062 0" />
     <parent link="TORSO" />
     <child link="HR_HIP" />
     <axis xyz="1 0 0" />
@@ -378,11 +379,11 @@
 
   <link name="HR_THIGH">
     <inertial>
-      <origin xyz="-0.00523 -0.0216 -0.0273" />
-      <mass value="0.61" />
-      <inertia ixx="0.001" ixy="-2.5E-06" ixz="-1.12E-04" iyy="0.00116" iyz="3.75E-07" izz="2.68E-04" />
+      <origin xyz="-0.0057137 -0.014631 -0.042453" rpy="0 0 0" />
+      <mass value="0.86" />
+      <inertia ixx="0.005736" ixy="0" ixz="0" iyy="0.004960" iyz="0" izz="0.001436" />
     </inertial>
-    <visual>
+ <visual>
       <origin rpy="0 0 0" xyz="0.0 0.0 0.0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/L_THIGH.dae" />
@@ -391,7 +392,7 @@
     <collision>
       <origin xyz="-0.024 0 -0.1"/>
       <geometry>
-        <box size="0.035 0.035 0.218"/>
+        <box size="0.035 0.035 0.215"/>
       </geometry>
     </collision>
     <collision>
@@ -403,7 +404,7 @@
   </link>
 
   <joint name="HR_HipY_joint" type="revolute">
-    <origin xyz="0 0.0985 0" />
+    <origin xyz="0 0.09735 0" />
     <parent link="HR_HIP" />
     <child link="HR_THIGH" />
     <axis xyz="0 1 0" />
@@ -412,11 +413,11 @@
 
   <link name="HR_SHANK">
     <inertial>
-      <origin xyz="0.00585 -8.732E-07 -0.12" />
-      <mass value="0.115" />
-      <inertia ixx="6.68E-04" ixy="-1.24E-08" ixz="6.91E-06" iyy="6.86E-04" iyz="5.65E-09" izz="3.155E-05" />
+      <origin xyz="0.0064794 -1.4558E-06 -0.12157" rpy="0 0 0" />
+      <mass value="0.1729" />
+      <inertia ixx="0.00089039" ixy="0"  ixz="0"  iyy="0.00090672" iyz="0" izz="3.1266E-05" />
     </inertial>
-    <visual>
+<visual>
       <origin rpy="3.14159265359 -1.4 0" xyz="0 0 0"/>
       <geometry>
         <mesh filename="package://lite3_description/meshes/SHANK.dae" />
@@ -452,10 +453,11 @@
   </link>
 
   <joint name="HR_Ankle" type="fixed" dont_collapse="true">
-    <origin xyz="-0.007 0 -0.21"/>
+    <origin xyz="0 0 -0.21012"/>
     <parent link="HR_SHANK" />
     <child link="HR_FOOT" />
   </joint>
+
 <transmission name="FL_HipX_tran">
     <type>transmission_interface/SimpleTransmission</type>
     <joint name="FL_HipX_joint">

@@ -29,28 +29,37 @@ void DepthBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_depth)
 
 void DepthBuffer::insert(torch::Tensor new_depth)
 {
+    // new_depth shape: [height, width] = [60, 86] (没有batch维度)
+    // depth_buf shape: [num_envs, include_history_steps, height, width] = [1, 3, 60, 86]
+    // Queue: index 0 (最老) -> index 1 -> index 2 (最新)
+    // depth_buf.index({0, i, ...}) 返回 shape: [60, 86]
+    
     if (!initialized) {
-        // 第一次插入：用第一帧复制满整个buffer
-        // new_depth shape: [1, height, width] (已经有batch维度)
-        // depth_buf shape: [num_envs, include_history_steps, height, width]
+        // 第一次插入：用第一帧复制满整个buffer (3帧)
         for (int i = 0; i < include_history_steps; ++i) {
-            depth_buf.index({torch::indexing::Slice(torch::indexing::None), i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+            depth_buf.index({0, i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
         }
         initialized = true;
     } else {
-        // 后续插入：正常的shift逻辑
-        // Shift observations back.
-        torch::Tensor shifted_depth = depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(include_history_steps - 1, torch::indexing::None), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}).clone();
-        depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, include_history_steps - 1), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = shifted_depth;
-
-        // Add new observation.
-        depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(-1), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+        // 后续插入：FIFO队列逻辑
+        // 将索引0和1的内容前移到索引0和1（索引0的内容被丢弃）
+        // 将索引1的内容移到索引0
+        depth_buf.index({0, 0, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = 
+            depth_buf.index({0, 1, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+        // 将索引2的内容移到索引1
+        depth_buf.index({0, 1, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = 
+            depth_buf.index({0, 2, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+        // 新帧插入到索引2（队尾）
+        depth_buf.index({0, 2, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
     }
 }
 
 torch::Tensor DepthBuffer::get_depth_vec()
 {
-    return depth_buf;
+    // 只返回前两帧（索引0和1），索引2（最新帧）不使用，实现一帧延迟
+    // depth_buf shape: [1, 3, 60, 86]
+    // 返回 shape: [1, 2, 60, 86]
+    return depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 2), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
 }
 
 torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::SharedPtr msg,
@@ -89,7 +98,7 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     // 转换为float类型并转换为米
     depth_tensor = depth_tensor.to(torch::kFloat32) / 1000.0;  // 转换为米
     
-    // First resize to intermediate size (60, 106) - similar to Python downsampling
+    // First resize to intermediate size (60, 106): height=60, width=106
     depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // Add batch and channel dims for interpolate
     depth_tensor = torch::nn::functional::interpolate(
         depth_tensor,
@@ -99,40 +108,30 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
             .align_corners(false)
     ).squeeze(0).squeeze(0);  // Remove dims back to [60, 106]
     
-    // Crop like Python: crop 2 rows from bottom and 4 columns from each side: depth_image[:-2, 4:-4]
-    depth_tensor = depth_tensor.index({torch::indexing::Slice(torch::indexing::None, -2), torch::indexing::Slice(4, -4)});  // [58, 98]
+    // Crop width: remove first 10 and last 10 columns [10:-10], keeping height unchanged
+    // Result: [60, 86]
+    depth_tensor = depth_tensor.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(10, -10)});  // [60, 86]
     
     // // 打印裁剪后的范围
     // std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
     
-    // // 将深度值裁剪到0.2-2.0米范围
+    // 将深度值裁剪到0.2-2.0米范围
     depth_tensor = torch::clamp(depth_tensor, 0.2, 2.0);
-    
-    // Final resize to target size (58, 87) - similar to Python resize_transform
-    depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // Add batch and channel dims again for interpolate
-    depth_tensor = torch::nn::functional::interpolate(
-        depth_tensor,
-        torch::nn::functional::InterpolateFuncOptions()
-            .size(std::vector<int64_t>{height, width})
-            .mode(torch::kBilinear)  // BICUBIC in Python, but Bilinear is close
-            .align_corners(false)
-    );
     
     // 发布用于可视化的深度图（在归一化之前保存原始值）
     if (processed_publisher) {
-        // 确保tensor是连续的，以便正确创建cv::Mat
+        // depth_tensor shape is [60, 86] at this point
         torch::Tensor processed_tensor = depth_tensor.contiguous();
         
-        // Get dimensions
-        int height = processed_tensor.sizes()[2]; // Assuming HxW
-        int width = processed_tensor.sizes()[3]; // Assuming HxW
+        // Get dimensions (height=60, width=86)
+        int h = processed_tensor.size(0);
+        int w = processed_tensor.size(1);
         
         // 创建cv::Mat，此时数据是实际的深度值（0.2~2.0米）
         // 使用32FC1格式（32位浮点数），单位米，无需转换
-        cv::Mat depth_mat(height, width, CV_32FC1, processed_tensor.data_ptr<float>());
+        cv::Mat depth_mat(h, w, CV_32FC1, processed_tensor.data_ptr<float>());
         
         // 使用32FC1编码发布，单位是米，rqt可以正确处理
-        // 如果使用mono16（16UC1），需要转换为毫米：depth_mat.convertTo(depth_uint16_mat, CV_16UC1, 1000.0);
         auto image_msg = cv_bridge::CvImage(msg->header, "32FC1", depth_mat).toImageMsg();
         processed_publisher->publish(*image_msg);
     }
@@ -141,7 +140,8 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     // depth_normalized = (depth_m - 1) / 2 将0.2-2.0映射到-0.5-0.5
     depth_tensor = (depth_tensor - 1.0) / 2.0;
     
+    // depth_tensor shape is already [60, 86] at this point, no need to resize
     // 打印调整后的深度值范围
     // std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
-    return depth_tensor.squeeze(0).squeeze(0);  // 移除batch和channel维度
+    return depth_tensor;  // Shape: [60, 86]
 }

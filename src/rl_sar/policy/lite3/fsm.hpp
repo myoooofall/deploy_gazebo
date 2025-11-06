@@ -54,10 +54,10 @@ public:
 
     float pre_running_percent = 0.0f;
     std::vector<float> pre_running_pos = {
-        0.00, -1.36, 2.65,
-        0.00, -1.36, 2.65,
-        0.00, -1.36, 2.65,
-        0.00, -1.36, 2.65,
+        0.00, 1.262, -2.557,
+        0.00, 1.262, -2.557,
+        0.00, 1.262, -2.557,
+        0.00, 1.262, -2.557,
     };
 
     void Enter() override
@@ -182,7 +182,7 @@ public:
         rl.episode_length_buf = 0;
 
         // read params from yaml
-        rl.config_name = "himloco";
+        rl.config_name = "nodepth";
         std::string robot_path = rl.robot_name + "/" + rl.config_name;
         try
         {

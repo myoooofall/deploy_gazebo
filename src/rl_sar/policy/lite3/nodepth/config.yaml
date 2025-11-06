@@ -1,10 +1,10 @@
 # Copyright (c) 2024-2025 Yuxuan Ma
 # SPDX-License-Identifier: Apache-2.0
 
-lite3/pie:
-  model_name: "backbone_1.pt"  # Not used, but required by ReadYamlRL
+lite3/nodepth:
+  model_name: "backbone_no_depth.pt"  # Not used, but required by ReadYamlRL
   head_name: "head_1.pt"
-  backbone_name: "backbone_1.pt"
+  backbone_name: "backbone_no_depth.pt"
   num_observations: 45
   observations: ["ang_vel", "gravity_vec","commands",  "dof_pos", "dof_vel", "actions"]
   observations_history: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]  # 0 is the latest observation
@@ -49,8 +49,8 @@ lite3/pie:
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0]
-  default_dof_pos: [-0.1, 0.80, -1.50,
-                    0.1, 0.8, -1.50,
+  default_dof_pos: [0.1, 0.8, -1.50,
+                    -0.1, 0.80, -1.50,
                     -0.1, 1.0, -1.50,
                     0.1, 1.0, -1.50]
   joint_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]

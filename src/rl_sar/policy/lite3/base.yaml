@@ -18,10 +18,11 @@ lite3:
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0]
-  default_dof_pos: [ 0.0, -0.80, 1.50,
-                     0.0, -0.80, 1.50,
-                     0.0, -0.80, 1.50,
-                     0.0, -0.80, 1.50]
+  default_dof_pos: [ -0.1, 0.80, -1.50,
+                     0.1, 0.80, -1.50,
+                     -0.1, 1.0, -1.50,
+                     0.1, 1.0, -1.50]
+                     
   joint_names: ["FL_HipX_joint", "FL_HipY_joint", "FL_Knee_joint",
                 "FR_HipX_joint", "FR_HipY_joint", "FR_Knee_joint",
                 "HL_HipX_joint", "HL_HipY_joint", "HL_Knee_joint",
