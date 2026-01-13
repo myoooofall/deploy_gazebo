@@ -600,14 +600,14 @@ torch::Tensor RL_Sim::Forward()
         this->history_obs_buf.insert(clamped_obs);
         this->history_obs = this->history_obs_buf.get_obs_vec(this->params.observations_history);
         // actions = this->model.forward({this->history_obs}).toTensor();
-        torch::Tensor depth_image = depth_buffer.get_depth_vec();
+        // torch::Tensor depth_image = depth_buffer.get_depth_vec();
         std::vector<torch::jit::IValue> inputs;
         inputs.push_back(this->history_obs);    // [1, 45]
         std::vector<torch::jit::IValue> vision_inputs;
-        vision_inputs.push_back(depth_image);
-        torch::Tensor vision_tokens = this->vision_head.forward(vision_inputs).toTensor();
+        // vision_inputs.push_back(depth_image);
+        // torch::Tensor vision_tokens = this->vision_head.forward(vision_inputs).toTensor();
         // inputs.push_back(vision_tokens);
-        actions = this->vision_backbone.forward(inputs).toTensor();
+        actions = this->model.forward(inputs).toTensor();
     }
     else
     {
