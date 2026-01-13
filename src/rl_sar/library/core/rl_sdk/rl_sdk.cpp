@@ -171,7 +171,7 @@ void RL::InitRL(std::string robot_path)
     }
 
     // init model
-    std::string model_path =  std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/himloco.pt";
+    std::string model_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/" + this->params.model_name;
     this->model = torch::jit::load(model_path);
 
     // std::string vision_head_path = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot_path + "/head_1.pt";

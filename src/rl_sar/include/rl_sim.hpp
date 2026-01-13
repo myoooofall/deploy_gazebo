@@ -24,6 +24,8 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <atomic>
+#include <mutex>
 
 #if defined(USE_ROS1)
 #include <ros/ros.h>
@@ -40,7 +42,10 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joy.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include <rcl_interfaces/srv/get_parameters.hpp>
 #endif
@@ -57,7 +62,7 @@ public:
     RL_Sim();
     ~RL_Sim();
 
-private:
+ private:
     // rl functions
     torch::Tensor Forward() override;
     void GetState(RobotState<double> *state) override;
@@ -69,6 +74,7 @@ private:
     std::shared_ptr<LoopFunc> loop_keyboard;
     std::shared_ptr<LoopFunc> loop_control;
     std::shared_ptr<LoopFunc> loop_rl;
+    std::shared_ptr<LoopFunc> loop_high;
     std::shared_ptr<LoopFunc> loop_plot;
 
     // plot
@@ -121,10 +127,14 @@ private:
     rclcpp::Publisher<robot_msgs::msg::RobotCommand>::SharedPtr robot_command_publisher;
     rclcpp::Subscription<robot_msgs::msg::RobotState>::SharedPtr robot_state_subscriber;
     rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedPtr param_client;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscriber;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_subscriber;
     void GazeboImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
     void CmdvelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
     void RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg);
     void JoyCallback(const sensor_msgs::msg::Joy::SharedPtr msg);
+    void OdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+    void NavGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 #endif
 
     // others
@@ -134,6 +144,62 @@ private:
     std::map<std::string, double> joint_velocities;
     std::map<std::string, double> joint_efforts;
     void StartJointController(const std::string& ros_namespace, const std::vector<std::string>& names);
+
+    // hierarchical navigation (high-level policy @ 10Hz)
+    void RunHighLevel();
+    bool InitHierarchicalNav();
+    void UpdateHighFrequencyObs();
+
+    // nav state shared across loops
+    std::atomic<bool> nav_enabled_{false};
+    std::atomic<bool> nav_models_loaded_{false};
+    std::atomic<bool> nav_has_goal_{false};
+    std::atomic<bool> nav_has_odom_{false};
+    std::atomic<uint64_t> nav_goal_seq_{0};
+
+    std::atomic<double> nav_base_x_{0.0};
+    std::atomic<double> nav_base_y_{0.0};
+    std::atomic<double> nav_base_yaw_{0.0};
+    std::atomic<double> nav_goal_x_{0.0};
+    std::atomic<double> nav_goal_y_{0.0};
+    std::atomic<double> nav_goal_yaw_{0.0};
+
+    std::atomic<double> nav_cmd_x_{0.0};
+    std::atomic<double> nav_cmd_y_{0.0};
+    std::atomic<double> nav_cmd_yaw_{0.0};
+
+    // buffers and models (guarded as needed)
+    torch::jit::script::Module nav_high_model_;
+    torch::jit::script::Module nav_vision_model_;
+    std::string nav_config_path_;
+    std::string nav_high_model_path_;
+    std::string nav_vision_model_path_;
+
+    int nav_obs_hist_len_ = 10;
+    int nav_obs_io_hist_len_ = 10;
+    int nav_highfreq_hist_len_ = 20;
+    double nav_dt_ = 0.1;               // 10Hz
+    double nav_episode_length_s_ = 30;  // default if not specified
+    double nav_clip_commands_ = 1.5;    // default clip
+    double nav_momentum_ = 0.95;        // command smoothing
+
+    std::mutex nav_highfreq_mutex_;
+    std::mutex nav_state_mutex_;
+    ObservationBuffer nav_highfreq_buf_;
+    ObservationBuffer nav_obs_hist_buf_;
+    ObservationBuffer nav_obs_io_hist_buf_;
+
+    torch::Tensor nav_position_targets_body_initial_;
+    torch::Tensor nav_spawn_positions_body_initial_;
+    torch::Tensor nav_high_command_;
+    torch::Tensor nav_momentum_high_command_;
+
+    std::atomic<uint64_t> nav_active_goal_seq_{0};
+    std::atomic<double> nav_time_io_{0.0};
+    std::atomic<double> nav_timer_left_{0.0};
+
+    std::mutex nav_last_actions_mutex_;
+    std::vector<float> nav_last_actions_;
 };
 
 #endif // RL_SIM_HPP

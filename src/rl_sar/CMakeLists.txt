@@ -67,6 +67,7 @@ if(NOT USE_CMAKE)
         find_package(std_srvs REQUIRED)
         find_package(geometry_msgs REQUIRED)
         find_package(sensor_msgs REQUIRED)
+        find_package(nav_msgs REQUIRED)
         find_package(cv_bridge REQUIRED)
         ament_package()
     endif()
@@ -227,6 +228,7 @@ if(NOT USE_CMAKE)
             gazebo_msgs
             std_srvs
             geometry_msgs
+            nav_msgs
         )
         install(TARGETS rl_sim DESTINATION lib/${PROJECT_NAME})
     endif()
