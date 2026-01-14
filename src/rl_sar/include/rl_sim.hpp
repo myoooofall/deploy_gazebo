@@ -44,8 +44,9 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
-#include <nav_msgs/msg/odometry.hpp>
+#include <geometry_msgs/msg/pose2_d.hpp>
+#include <gazebo_msgs/srv/spawn_entity.hpp>
+#include <gazebo_msgs/srv/delete_entity.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include <rcl_interfaces/srv/get_parameters.hpp>
 #endif
@@ -127,14 +128,12 @@ public:
     rclcpp::Publisher<robot_msgs::msg::RobotCommand>::SharedPtr robot_command_publisher;
     rclcpp::Subscription<robot_msgs::msg::RobotState>::SharedPtr robot_state_subscriber;
     rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedPtr param_client;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscriber;
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_subscriber;
+    rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr nav_goal_body_subscriber;
     void GazeboImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
     void CmdvelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
     void RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg);
     void JoyCallback(const sensor_msgs::msg::Joy::SharedPtr msg);
-    void OdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
-    void NavGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+    void NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg);
 #endif
 
     // others
@@ -154,19 +153,21 @@ public:
     std::atomic<bool> nav_enabled_{false};
     std::atomic<bool> nav_models_loaded_{false};
     std::atomic<bool> nav_has_goal_{false};
-    std::atomic<bool> nav_has_odom_{false};
     std::atomic<uint64_t> nav_goal_seq_{0};
 
-    std::atomic<double> nav_base_x_{0.0};
-    std::atomic<double> nav_base_y_{0.0};
-    std::atomic<double> nav_base_yaw_{0.0};
-    std::atomic<double> nav_goal_x_{0.0};
-    std::atomic<double> nav_goal_y_{0.0};
-    std::atomic<double> nav_goal_yaw_{0.0};
+    std::atomic<double> nav_goal_body_x_{0.0};
+    std::atomic<double> nav_goal_body_y_{0.0};
+    std::atomic<double> nav_goal_body_yaw_{0.0};
 
     std::atomic<double> nav_cmd_x_{0.0};
     std::atomic<double> nav_cmd_y_{0.0};
     std::atomic<double> nav_cmd_yaw_{0.0};
+
+    // gazebo goal marker (visualization)
+    std::atomic<bool> nav_goal_marker_spawned_{false};
+    rclcpp::Client<gazebo_msgs::srv::SpawnEntity>::SharedPtr nav_goal_marker_spawn_client;
+    rclcpp::Client<gazebo_msgs::srv::DeleteEntity>::SharedPtr nav_goal_marker_delete_client;
+    void UpdateNavGoalMarker(double goal_body_x, double goal_body_y, double goal_body_yaw);
 
     // buffers and models (guarded as needed)
     torch::jit::script::Module nav_high_model_;
@@ -180,7 +181,7 @@ public:
     int nav_highfreq_hist_len_ = 20;
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
-    double nav_clip_commands_ = 1.5;    // default clip
+    double nav_clip_commands_ = 3.0;    // default clip
     double nav_momentum_ = 0.95;        // command smoothing
 
     std::mutex nav_highfreq_mutex_;

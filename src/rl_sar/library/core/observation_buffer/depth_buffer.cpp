@@ -115,8 +115,8 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     // // 打印裁剪后的范围
     // std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
     
-    // 将深度值裁剪到0.2-2.0米范围
-    depth_tensor = torch::clamp(depth_tensor, 0.2, 2.0);
+    // 将深度值裁剪到0.05-5.0米范围
+    depth_tensor = torch::clamp(depth_tensor, 0.05, 5.0);
     
     // 发布用于可视化的深度图（在归一化之前保存原始值）
     if (processed_publisher) {
@@ -138,7 +138,7 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     
     // 归一化到-0.5到0.5范围 (用于推理)
     // depth_normalized = (depth_m - 1) / 2 将0.2-2.0映射到-0.5-0.5
-    depth_tensor = (depth_tensor - 1.0) / 2.0;
+    depth_tensor = depth_tensor/5-0.5 ;
     
     // depth_tensor shape is already [60, 86] at this point, no need to resize
     // 打印调整后的深度值范围

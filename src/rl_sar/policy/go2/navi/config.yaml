@@ -7,7 +7,7 @@ go2/navi:
   vision_model_name: "go2_navi_vision.pt"
   nav_dt: 0.1
   nav_episode_length_s: 30.0
-  clip_commands: 1.5
+  clip_commands: 3.0
   momentum_factor: 0.95
   num_observations: 45
   observations: ["commands", "ang_vel", "gravity_vec", "dof_pos", "dof_vel", "actions"]

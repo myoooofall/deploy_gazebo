@@ -5,6 +5,67 @@
 
 #include "rl_sim.hpp"
 
+static geometry_msgs::msg::Quaternion YawToQuaternion(double yaw)
+{
+    geometry_msgs::msg::Quaternion q;
+    const double half = 0.5 * yaw;
+    q.x = 0.0;
+    q.y = 0.0;
+    q.z = std::sin(half);
+    q.w = std::cos(half);
+    return q;
+}
+
+static std::string BuildNavGoalMarkerSdf()
+{
+    // Visual-only marker (no collision), an arrow pointing along +X.
+    // Spawned using /spawn_entity with reference_frame="robot_model".
+    return R"(
+<sdf version="1.6">
+  <model name="nav_goal_marker">
+    <static>true</static>
+    <link name="link">
+      <!-- Shaft -->
+      <visual name="shaft">
+        <pose>0.45 0 0 0 0 0</pose>
+        <geometry>
+          <box><size>0.9 0.08 0.08</size></box>
+        </geometry>
+        <material>
+          <ambient>1 0 0 1</ambient>
+          <diffuse>1 0 0 1</diffuse>
+          <emissive>0.6 0 0 1</emissive>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Red</name>
+          </script>
+        </material>
+        <cast_shadows>false</cast_shadows>
+      </visual>
+
+      <!-- Head (brighter + wider) -->
+      <visual name="head">
+        <pose>1.05 0 0 0 0 0</pose>
+        <geometry>
+          <box><size>0.3 0.18 0.12</size></box>
+        </geometry>
+        <material>
+          <ambient>1 1 0 1</ambient>
+          <diffuse>1 1 0 1</diffuse>
+          <emissive>1 1 0 1</emissive>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Yellow</name>
+          </script>
+        </material>
+        <cast_shadows>false</cast_shadows>
+      </visual>
+    </link>
+  </model>
+</sdf>
+)";
+}
+
 RL_Sim::RL_Sim()
 #if defined(USE_ROS2)
     : rclcpp::Node("rl_sim_node")
@@ -152,23 +213,23 @@ RL_Sim::RL_Sim()
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
         depth_buffer = DepthBuffer(1, 60, 86, 3);  // 1个环境，3帧历史，最终尺寸60x86 (height=60, width=86)
 
-    // hierarchical navigation: odometry + goal
-    this->odom_subscriber = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", rclcpp::SystemDefaultsQoS(),
-        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->OdomCallback(msg); }
-    );
-    this->nav_goal_subscriber = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/nav_goal", rclcpp::SystemDefaultsQoS(),
-        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { this->NavGoalCallback(msg); }
+    // hierarchical navigation: body-frame goal only (no odom dependency)
+    this->nav_goal_body_subscriber = this->create_subscription<geometry_msgs::msg::Pose2D>(
+        "/nav_goal_body", rclcpp::SystemDefaultsQoS(),
+        [this](const geometry_msgs::msg::Pose2D::SharedPtr msg) { this->NavGoalBodyCallback(msg); }
     );
 
-    // service
-    this->gazebo_pause_physics_client = this->create_client<std_srvs::srv::Empty>("/pause_physics");
-    this->gazebo_unpause_physics_client = this->create_client<std_srvs::srv::Empty>("/unpause_physics");
-    this->gazebo_reset_world_client = this->create_client<std_srvs::srv::Empty>("/reset_world");
+	    // service
+	    this->gazebo_pause_physics_client = this->create_client<std_srvs::srv::Empty>("/pause_physics");
+	    this->gazebo_unpause_physics_client = this->create_client<std_srvs::srv::Empty>("/unpause_physics");
+	    this->gazebo_reset_world_client = this->create_client<std_srvs::srv::Empty>("/reset_world");
 
-    auto empty_request = std::make_shared<std_srvs::srv::Empty::Request>();
-    auto result = this->gazebo_reset_world_client->async_send_request(empty_request);
+    // gazebo goal marker services (optional)
+    this->nav_goal_marker_spawn_client = this->create_client<gazebo_msgs::srv::SpawnEntity>("/spawn_entity");
+    this->nav_goal_marker_delete_client = this->create_client<gazebo_msgs::srv::DeleteEntity>("/delete_entity");
+
+	    auto empty_request = std::make_shared<std_srvs::srv::Empty::Request>();
+	    auto result = this->gazebo_reset_world_client->async_send_request(empty_request);
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
@@ -572,34 +633,84 @@ void RL_Sim::RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg
     this->robot_state_subscriber_msg = *msg;
 }
 
-void RL_Sim::OdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+void RL_Sim::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
 {
-    this->nav_base_x_.store(msg->pose.pose.position.x);
-    this->nav_base_y_.store(msg->pose.pose.position.y);
-    const auto &q = msg->pose.pose.orientation;
-    const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-    const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-    this->nav_base_yaw_.store(std::atan2(siny_cosp, cosy_cosp));
-    this->nav_has_odom_.store(true);
-}
-
-static double YawFromQuaternionWXYZ(double w, double x, double y, double z)
-{
-    const double siny_cosp = 2.0 * (w * z + x * y);
-    const double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
-    return std::atan2(siny_cosp, cosy_cosp);
-}
-
-void RL_Sim::NavGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-{
-    this->nav_goal_x_.store(msg->pose.position.x);
-    this->nav_goal_y_.store(msg->pose.position.y);
-    const auto &q = msg->pose.orientation;
-    this->nav_goal_yaw_.store(YawFromQuaternionWXYZ(q.w, q.x, q.y, q.z));
+    this->nav_goal_body_x_.store(msg->x);
+    this->nav_goal_body_y_.store(msg->y);
+    this->nav_goal_body_yaw_.store(msg->theta);
     this->nav_has_goal_.store(true);
     this->nav_goal_seq_.fetch_add(1);
+    std::cout << LOGGER::INFO << "NavGoalBody: x=" << msg->x << " y=" << msg->y << " yaw=" << msg->theta << std::endl;
+
+    // Best-effort visualization in Gazebo: place/update a marker in world.
+    this->UpdateNavGoalMarker(msg->x, msg->y, msg->theta);
 }
 #endif
+
+void RL_Sim::UpdateNavGoalMarker(double goal_body_x, double goal_body_y, double goal_body_yaw)
+{
+#if defined(USE_ROS2)
+    const char *kRobotEntity = "robot_model";
+
+    if (!this->nav_goal_marker_spawn_client || !this->nav_goal_marker_delete_client)
+    {
+        return;
+    }
+
+    if (!this->nav_goal_marker_delete_client->wait_for_service(std::chrono::milliseconds(200)))
+    {
+        return;
+    }
+    if (!this->nav_goal_marker_spawn_client->wait_for_service(std::chrono::milliseconds(200)))
+    {
+        return;
+    }
+
+    // For robustness (no extra Gazebo state plugin required), respawn the marker at the goal pose.
+    // Using reference_frame="robot_model" makes goal_body_* interpreted in the robot body frame at spawn time.
+    auto spawn_req = std::make_shared<gazebo_msgs::srv::SpawnEntity::Request>();
+    spawn_req->name = "nav_goal_marker";
+    spawn_req->xml = BuildNavGoalMarkerSdf();
+    spawn_req->robot_namespace = "";
+    spawn_req->reference_frame = kRobotEntity;
+    spawn_req->initial_pose.position.x = goal_body_x;
+    spawn_req->initial_pose.position.y = goal_body_y;
+    spawn_req->initial_pose.position.z = 0.4;
+    spawn_req->initial_pose.orientation = YawToQuaternion(goal_body_yaw);
+
+    auto del_req = std::make_shared<gazebo_msgs::srv::DeleteEntity::Request>();
+    del_req->name = "nav_goal_marker";
+    (void)this->nav_goal_marker_delete_client->async_send_request(
+        del_req,
+        [this, spawn_req](rclcpp::Client<gazebo_msgs::srv::DeleteEntity>::SharedFuture)
+        {
+            (void)this->nav_goal_marker_spawn_client->async_send_request(
+                spawn_req,
+                [this](rclcpp::Client<gazebo_msgs::srv::SpawnEntity>::SharedFuture future)
+                {
+                    try
+                    {
+                        const auto resp = future.get();
+                        if (!resp->success)
+                        {
+                            std::cout << LOGGER::WARNING << "Spawn nav_goal_marker failed: " << resp->status_message << std::endl;
+                            this->nav_goal_marker_spawned_.store(false);
+                            return;
+                        }
+                        this->nav_goal_marker_spawned_.store(true);
+                    }
+                    catch (...)
+                    {
+                        this->nav_goal_marker_spawned_.store(false);
+                    }
+                });
+        });
+#else
+    (void)goal_body_x;
+    (void)goal_body_y;
+    (void)goal_body_yaw;
+#endif
+}
 
 void RL_Sim::RunModel()
 {
@@ -608,14 +719,9 @@ void RL_Sim::RunModel()
         this->episode_length_buf += 1;
         // this->obs.lin_vel = torch::tensor({{this->vel.linear.x, this->vel.linear.y, this->vel.linear.z}});
         this->obs.ang_vel = torch::tensor(this->robot_state.imu.gyroscope).unsqueeze(0);
-        if (this->control.navigation_mode)
-        {
-            this->obs.commands = torch::tensor({{this->cmd_vel.linear.x, this->cmd_vel.linear.y, this->cmd_vel.angular.z}});
-        }
-        else
-        {
-            this->obs.commands = torch::tensor({{this->control.x, this->control.y, this->control.yaw}});
-        }
+        // Always feed the low-level policy with the active control command.
+        // In navigation mode, KeyboardInterface already overwrites control.{x,y,yaw} with the high-level outputs.
+        this->obs.commands = torch::tensor({{this->control.x, this->control.y, this->control.yaw}});
         this->obs.base_quat = torch::tensor(this->robot_state.imu.quaternion).unsqueeze(0);
         this->obs.dof_pos = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
         this->obs.dof_vel = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
@@ -840,21 +946,13 @@ void RL_Sim::UpdateHighFrequencyObs()
     }
 }
 
-static double WrapToPi(double angle)
-{
-    constexpr double kPi = 3.14159265358979323846;
-    while (angle > kPi) angle -= 2.0 * kPi;
-    while (angle < -kPi) angle += 2.0 * kPi;
-    return angle;
-}
-
-void RL_Sim::RunHighLevel()
-{
+	void RL_Sim::RunHighLevel()
+	{
     if (!this->nav_models_loaded_.load() || !this->nav_enabled_.load())
     {
         return;
     }
-    if (!this->nav_has_goal_.load() || !this->nav_has_odom_.load() || !this->rl_init_done)
+    if (!this->nav_has_goal_.load() || !this->rl_init_done)
     {
         return;
     }
@@ -862,12 +960,9 @@ void RL_Sim::RunHighLevel()
     const uint64_t goal_seq = this->nav_goal_seq_.load();
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
 
-    const double base_x = this->nav_base_x_.load();
-    const double base_y = this->nav_base_y_.load();
-    const double base_yaw = this->nav_base_yaw_.load();
-    const double goal_x = this->nav_goal_x_.load();
-    const double goal_y = this->nav_goal_y_.load();
-    const double goal_yaw = this->nav_goal_yaw_.load();
+    const double goal_body_x_in = this->nav_goal_body_x_.load();
+    const double goal_body_y_in = this->nav_goal_body_y_.load();
+    const double goal_body_yaw_in = this->nav_goal_body_yaw_.load();
 
     if (new_goal)
     {
@@ -880,14 +975,7 @@ void RL_Sim::RunHighLevel()
         this->nav_cmd_y_.store(0.0);
         this->nav_cmd_yaw_.store(0.0);
 
-        const double dx = goal_x - base_x;
-        const double dy = goal_y - base_y;
-        const double c = std::cos(-base_yaw);
-        const double s = std::sin(-base_yaw);
-        const double goal_body_x = dx * c - dy * s;
-        const double goal_body_y = dx * s + dy * c;
-        const double goal_body_yaw = WrapToPi(goal_yaw - base_yaw);
-        this->nav_position_targets_body_initial_ = torch::tensor({{static_cast<float>(goal_body_x), static_cast<float>(goal_body_y), static_cast<float>(goal_body_yaw)}});
+        this->nav_position_targets_body_initial_ = torch::tensor({{static_cast<float>(goal_body_x_in), static_cast<float>(goal_body_y_in), static_cast<float>(goal_body_yaw_in)}});
         this->nav_spawn_positions_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
     }
 
@@ -1004,22 +1092,52 @@ void RL_Sim::RunHighLevel()
     }
 
     torch::Tensor cmd;
-    std::vector<torch::jit::IValue> inputs4 = {obs_hist, obs_io_hist, hf_hist, vision_feat};
-    std::vector<torch::jit::IValue> inputs3 = {obs_hist, obs_io_hist, hf_hist};
-    std::vector<torch::jit::IValue> inputs2 = {obs_hist, vision_feat};
-    bool ok = false;
-    try { cmd = this->nav_high_model_.forward(inputs4).toTensor(); ok = true; } catch (const c10::Error &) {}
-    if (!ok)
+    // Training inference (exported JIT):
+    //   vision_tokens = nav_vision_model_(depth)
+    //   actions, v, target_pos, spawn_pos = nav_high_model_(obs, obs_h, obs_history_io_buf, vision_tokens, io_high_frequency_history_buf)
+    // Here:
+    //   obs                 -> obs_frame (current frame)
+    //   obs_h               -> obs_hist (10-frame history of obs_frame, flattened)
+    //   obs_history_io_buf   -> obs_io_hist (10-frame history of obs_io_frame, flattened)
+    //   vision_tokens        -> vision_feat
+    //   io_high_frequency... -> hf_hist (20-frame history, flattened)
+    torch::jit::IValue out;
+    try
     {
-        try { cmd = this->nav_high_model_.forward(inputs3).toTensor(); ok = true; } catch (const c10::Error &) {}
+        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_hist, obs_io_hist, vision_feat, hf_hist};
+        out = this->nav_high_model_.forward(inputs);
     }
-    if (!ok)
+    catch (const c10::Error &e)
     {
-        try { cmd = this->nav_high_model_.forward(inputs2).toTensor(); ok = true; } catch (const c10::Error &e) {
-            std::cout << LOGGER::WARNING << "Nav high forward failed: " << e.what() << std::endl;
+        std::cout << LOGGER::WARNING << "Nav high forward failed: " << e.what() << std::endl;
+        return;
+    }
+
+    // Unpack output: some models return a Tensor, some return a tuple where first element is actions/cmd.
+    try
+    {
+        if (out.isTensor())
+        {
+            cmd = out.toTensor();
+        }
+        else if (out.isTuple())
+        {
+            auto elems = out.toTuple()->elements();
+            if (!elems.empty() && elems[0].isTensor())
+            {
+                cmd = elems[0].toTensor();
+            }
+        }
+        else if (out.isList())
+        {
+            auto list = out.toList();
+            if (list.size() > 0 && list.get(0).isTensor())
+            {
+                cmd = list.get(0).toTensor();
+            }
         }
     }
-    if (!ok)
+    catch (...)
     {
         return;
     }
@@ -1029,8 +1147,28 @@ void RL_Sim::RunHighLevel()
         return;
     }
 
+    const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
+
     // clip + momentum smoothing
-    cmd = torch::clamp(cmd, -static_cast<float>(this->nav_clip_commands_), static_cast<float>(this->nav_clip_commands_));
+    cmd = torch::clamp(cmd_raw, -static_cast<float>(this->nav_clip_commands_), static_cast<float>(this->nav_clip_commands_));
+
+    // Debug print high-level network output (raw + clipped), at ~1Hz to avoid spam.
+    static int dbg_tick = 0;
+    dbg_tick = (dbg_tick + 1) % 10; // RunHighLevel runs at 10Hz by default.
+    if (dbg_tick == 0 || new_goal)
+    {
+        const double rx = cmd_raw[0][0].item<double>();
+        const double ry = cmd_raw[0][1].item<double>();
+        const double rz = cmd_raw[0][2].item<double>();
+        const double cx = cmd[0][0].item<double>();
+        const double cy = cmd[0][1].item<double>();
+        const double cz = cmd[0][2].item<double>();
+        std::cout << LOGGER::INFO
+                  << "NavHigh raw:[" << rx << ", " << ry << ", " << rz << "]"
+                  << " clipped:[" << cx << ", " << cy << ", " << cz << "]"
+                  << " goal_body:[" << goal_body_x_in << ", " << goal_body_y_in << ", " << goal_body_yaw_in << "]"
+                  << std::endl;
+    }
 
     this->nav_cmd_x_.store(cmd[0][0].item<double>());
     this->nav_cmd_y_.store(cmd[0][1].item<double>());

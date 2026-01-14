@@ -4,5 +4,9 @@
 
     <xacro:include filename="$(find go2_description)/urdf/go2_description.urdf"/>
     <xacro:include filename="$(find go2_description)/xacro/gazebo.xacro"/>
-
+    <!-- D34i相机 -->   
+    <xacro:include filename="$(find go2w_description)/xacro/_d435i.urdf.xacro"/>
+    <xacro:sensor_d435i parent="base" name="camera" topics_ns="camera">
+        <origin  xyz="0.345 0 0.07" rpy="0 0.25 0"/>
+    </xacro:sensor_d435i>
 </robot>

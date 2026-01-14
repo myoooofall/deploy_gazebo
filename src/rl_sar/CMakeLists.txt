@@ -346,6 +346,8 @@ if(NOT USE_CMAKE)
     elseif($ENV{ROS_DISTRO} MATCHES "foxy|humble")
         install(PROGRAMS
             scripts/actuator_net.py
+            scripts/nav_goal_dialog.py
+            scripts/generate_terrain_world.py
             DESTINATION lib/${PROJECT_NAME}
         )
     endif()
