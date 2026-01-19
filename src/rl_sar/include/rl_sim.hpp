@@ -44,9 +44,11 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <gazebo_msgs/msg/model_states.hpp>
 #include <geometry_msgs/msg/pose2_d.hpp>
 #include <gazebo_msgs/srv/spawn_entity.hpp>
 #include <gazebo_msgs/srv/delete_entity.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include <rcl_interfaces/srv/get_parameters.hpp>
 #endif
@@ -118,6 +120,19 @@ public:
     sensor_msgs::msg::Joy joy_msg;
     robot_msgs::msg::RobotCommand robot_command_publisher_msg;
     robot_msgs::msg::RobotState robot_state_subscriber_msg;
+    rclcpp::Subscription<gazebo_msgs::msg::ModelStates>::SharedPtr gazebo_model_states_subscriber;
+    rclcpp::Subscription<gazebo_msgs::msg::ModelStates>::SharedPtr gazebo_model_states_subscriber_alt;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr nav_odom_subscriber;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr nav_odom_subscriber_alt;
+    std::atomic<double> nav_base_world_x_{0.0};
+    std::atomic<double> nav_base_world_y_{0.0};
+    std::atomic<double> nav_base_world_z_{0.0};
+    std::atomic<double> nav_base_world_yaw_{0.0};
+    std::atomic<double> nav_base_world_qx_{0.0};
+    std::atomic<double> nav_base_world_qy_{0.0};
+    std::atomic<double> nav_base_world_qz_{0.0};
+    std::atomic<double> nav_base_world_qw_{1.0};
+    std::atomic<bool> nav_base_world_valid_{false};
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr gazebo_imu_subscriber;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscriber;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_subscriber;
@@ -130,6 +145,8 @@ public:
     rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedPtr param_client;
     rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr nav_goal_body_subscriber;
     void GazeboImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
+    void GazeboModelStatesCallback(const gazebo_msgs::msg::ModelStates::SharedPtr msg);
+    void NavOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
     void CmdvelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
     void RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg);
     void JoyCallback(const sensor_msgs::msg::Joy::SharedPtr msg);
@@ -158,6 +175,11 @@ public:
     std::atomic<double> nav_goal_body_x_{0.0};
     std::atomic<double> nav_goal_body_y_{0.0};
     std::atomic<double> nav_goal_body_yaw_{0.0};
+    // goal in world (latched from body goal + robot pose at goal time), used to compute live goal_body like training code
+    std::atomic<double> nav_goal_world_x_{0.0};
+    std::atomic<double> nav_goal_world_y_{0.0};
+    std::atomic<double> nav_goal_world_yaw_{0.0};
+    std::atomic<bool> nav_goal_world_valid_{false};
 
     std::atomic<double> nav_cmd_x_{0.0};
     std::atomic<double> nav_cmd_y_{0.0};
@@ -168,6 +190,7 @@ public:
     rclcpp::Client<gazebo_msgs::srv::SpawnEntity>::SharedPtr nav_goal_marker_spawn_client;
     rclcpp::Client<gazebo_msgs::srv::DeleteEntity>::SharedPtr nav_goal_marker_delete_client;
     void UpdateNavGoalMarker(double goal_body_x, double goal_body_y, double goal_body_yaw);
+    void UpdateNavPredMarker(double pred_body_x, double pred_body_y, double pred_body_yaw);
 
     // buffers and models (guarded as needed)
     torch::jit::script::Module nav_high_model_;
@@ -182,7 +205,7 @@ public:
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
     double nav_clip_commands_ = 3.0;    // default clip
-    double nav_momentum_ = 0.95;        // command smoothing
+
 
     std::mutex nav_highfreq_mutex_;
     std::mutex nav_state_mutex_;
@@ -193,7 +216,6 @@ public:
     torch::Tensor nav_position_targets_body_initial_;
     torch::Tensor nav_spawn_positions_body_initial_;
     torch::Tensor nav_high_command_;
-    torch::Tensor nav_momentum_high_command_;
 
     std::atomic<uint64_t> nav_active_goal_seq_{0};
     std::atomic<double> nav_time_io_{0.0};

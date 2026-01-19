@@ -43,23 +43,14 @@ void ObservationBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_obs
 
 void ObservationBuffer::insert(torch::Tensor new_obs)
 {
-    if (!initialized) {
-        // 第一次插入：用第一帧复制满整个buffer
-        // new_obs shape: [num_envs, num_obs]
-        // obs_buf shape: [num_envs, num_obs * history_length]
-        for (int i = 0; i < history_length; ++i) {
-            obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(i * num_obs, (i + 1) * num_obs)}) = new_obs;
-        }
-        initialized = true;
-    } else {
-        // 后续插入：正常的shift逻辑
-        // Shift observations back.
+    
+   
         torch::Tensor shifted_obs = obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(num_obs, num_obs * history_length)}).clone();
         obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, num_obs * (history_length - 1))}) = shifted_obs;
 
         // Add new observation.
         obs_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(-num_obs, torch::indexing::None)}) = new_obs;
-    }
+    
 }
 
 /**

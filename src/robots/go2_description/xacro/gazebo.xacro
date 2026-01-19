@@ -249,6 +249,21 @@
         </plugin>
     </gazebo>
 
+    <!-- Publish base pose in world as nav_msgs/Odometry (needed for goal_body_live computation). -->
+    <gazebo>
+      <plugin name="gazebo_ros_p3d" filename="libgazebo_ros_p3d.so">
+        <ros>
+          <namespace>/go2_gazebo</namespace>
+          <remapping>odom:=odom</remapping>
+        </ros>
+        <body_name>base</body_name>
+        <update_rate>100</update_rate>
+        <xyz_offset>0 0 0</xyz_offset>
+        <rpy_offset>0 0 0</rpy_offset>
+        <gaussian_noise>0.0</gaussian_noise>
+      </plugin>
+    </gazebo>
+
     </xacro:if>
 
     <gazebo reference="base">

@@ -59,15 +59,25 @@ def generate_launch_description():
         parameters=[{"robot_description": robot_description}],
     )
 
-    gazebo = IncludeLaunchDescription(
+    # NOTE: gazebo_ros/launch/gazebo.launch.py does not forward arguments to gzserver.launch.py.
+    # Include gzserver/gzclient directly so we can reliably load libgazebo_ros_state.so (publishes /model_states).
+    gazebo_server = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory("gazebo_ros"), "launch", "gazebo.launch.py")
+            os.path.join(get_package_share_directory("gazebo_ros"), "launch", "gzserver.launch.py")
         ),
         launch_arguments={
             # "verbose": "true",
-            # "pause": "true",  # Not Available
+            # "pause": "true",
             "world": world_path,
+            # Use the no-space form ("-slib...") because ExecuteProcess passes each list item as one argv token.
+            "extra_gazebo_args": "-slibgazebo_ros_state.so",
         }.items(),
+    )
+
+    gazebo_client = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(get_package_share_directory("gazebo_ros"), "launch", "gzclient.launch.py")
+        ),
     )
 
     spawn_entity = Node(
@@ -231,7 +241,8 @@ def generate_launch_description():
         DeclareLaunchArgument("spawn_yaw", default_value=TextSubstitution(text="0.0")),
         OpaqueFunction(function=_setup),
         robot_state_publisher_node,
-        gazebo,
+        gazebo_server,
+        gazebo_client,
         spawn_entity,
         joint_state_broadcaster_node,
         # robot_joint_controller_node,  # Spawn in rl_sim.cpp

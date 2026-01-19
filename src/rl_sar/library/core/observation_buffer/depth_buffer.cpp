@@ -29,10 +29,7 @@ void DepthBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_depth)
 
 void DepthBuffer::insert(torch::Tensor new_depth)
 {
-    // new_depth shape: [height, width] = [60, 86] (没有batch维度)
-    // depth_buf shape: [num_envs, include_history_steps, height, width] = [1, 3, 60, 86]
-    // Queue: index 0 (最老) -> index 1 -> index 2 (最新)
-    // depth_buf.index({0, i, ...}) 返回 shape: [60, 86]
+
     
     if (!initialized) {
         // 第一次插入：用第一帧复制满整个buffer (3帧)
@@ -65,14 +62,7 @@ torch::Tensor DepthBuffer::get_depth_vec()
 torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::SharedPtr msg,
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_publisher)  
 {
-    // // 打印消息格式信息
-    // std::cout << "深度图编码格式: " << msg->encoding << std::endl;
-    // std::cout << "每个像素的字节数: " << msg->step / msg->width << std::endl;
-    // std::cout << "是否大端序: " << msg->is_bigendian << std::endl;
-    
-    // // 打印原始图像尺寸
-    // std::cout << "原始图像尺寸: " << msg->width << "x" << msg->height << std::endl;
-    // std::cout << "目标图像尺寸: " << width << "x" << height << std::endl;
+   
     
     // 正确读取16位深度数据
     std::vector<uint16_t> depth_data;
@@ -127,8 +117,7 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
         int h = processed_tensor.size(0);
         int w = processed_tensor.size(1);
         
-        // 创建cv::Mat，此时数据是实际的深度值（0.2~2.0米）
-        // 使用32FC1格式（32位浮点数），单位米，无需转换
+        
         cv::Mat depth_mat(h, w, CV_32FC1, processed_tensor.data_ptr<float>());
         
         // 使用32FC1编码发布，单位是米，rqt可以正确处理
@@ -137,8 +126,8 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     }
     
     // 归一化到-0.5到0.5范围 (用于推理)
-    // depth_normalized = (depth_m - 1) / 2 将0.2-2.0映射到-0.5-0.5
-    depth_tensor = depth_tensor/5-0.5 ;
+    
+    depth_tensor = depth_tensor/5-1 ;
     
     // depth_tensor shape is already [60, 86] at this point, no need to resize
     // 打印调整后的深度值范围

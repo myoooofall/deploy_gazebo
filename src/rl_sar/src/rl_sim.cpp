@@ -5,6 +5,7 @@
 
 #include "rl_sim.hpp"
 
+#if defined(USE_ROS2)
 static geometry_msgs::msg::Quaternion YawToQuaternion(double yaw)
 {
     geometry_msgs::msg::Quaternion q;
@@ -14,6 +15,34 @@ static geometry_msgs::msg::Quaternion YawToQuaternion(double yaw)
     q.z = std::sin(half);
     q.w = std::cos(half);
     return q;
+}
+#endif
+
+static double QuaternionToYaw(double x, double y, double z, double w)
+{
+    const double siny_cosp = 2.0 * (w * z + x * y);
+    const double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+    return std::atan2(siny_cosp, cosy_cosp);
+}
+
+static double WrapToPi(double a)
+{
+    while (a > M_PI) a -= 2.0 * M_PI;
+    while (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+}
+
+static void RotateVecByQuat(double qx, double qy, double qz, double qw, double vx, double vy, double vz,
+                            double &ox, double &oy, double &oz)
+{
+    // v' = v + w*(2*q.xyz x v) + (q.xyz x (2*q.xyz x v))
+    const double tx = 2.0 * (qy * vz - qz * vy);
+    const double ty = 2.0 * (qz * vx - qx * vz);
+    const double tz = 2.0 * (qx * vy - qy * vx);
+
+    ox = vx + qw * tx + (qy * tz - qz * ty);
+    oy = vy + qw * ty + (qz * tx - qx * tz);
+    oz = vz + qw * tz + (qx * ty - qy * tx);
 }
 
 static std::string BuildNavGoalMarkerSdf()
@@ -56,6 +85,51 @@ static std::string BuildNavGoalMarkerSdf()
           <script>
             <uri>file://media/materials/scripts/gazebo.material</uri>
             <name>Gazebo/Yellow</name>
+          </script>
+        </material>
+        <cast_shadows>false</cast_shadows>
+      </visual>
+    </link>
+  </model>
+</sdf>
+)";
+}
+
+static std::string BuildNavPredMarkerSdf()
+{
+    return R"(
+<sdf version="1.6">
+  <model name="nav_pred_marker">
+    <static>true</static>
+    <link name="link">
+      <visual name="shaft">
+        <pose>0.45 0 0 0 0 0</pose>
+        <geometry>
+          <box><size>0.9 0.08 0.08</size></box>
+        </geometry>
+        <material>
+          <ambient>0 1 0 1</ambient>
+          <diffuse>0 1 0 1</diffuse>
+          <emissive>0 0.6 0 1</emissive>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Green</name>
+          </script>
+        </material>
+        <cast_shadows>false</cast_shadows>
+      </visual>
+      <visual name="head">
+        <pose>1.05 0 0 0 0 0</pose>
+        <geometry>
+          <box><size>0.3 0.18 0.12</size></box>
+        </geometry>
+        <material>
+          <ambient>0 1 1 1</ambient>
+          <diffuse>0 1 1 1</diffuse>
+          <emissive>0 1 1 1</emissive>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Cyan</name>
           </script>
         </material>
         <cast_shadows>false</cast_shadows>
@@ -199,6 +273,26 @@ RL_Sim::RL_Sim()
     );
     this->gazebo_imu_subscriber = this->create_subscription<sensor_msgs::msg::Imu>(
         "/imu", rclcpp::SystemDefaultsQoS(), [this] (const sensor_msgs::msg::Imu::SharedPtr msg) {this->GazeboImuCallback(msg);}
+    );
+    // Gazebo topics are often best-effort; use best-effort QoS to avoid mismatch and missing callbacks.
+    const auto model_states_qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
+    this->gazebo_model_states_subscriber = this->create_subscription<gazebo_msgs::msg::ModelStates>(
+        "/gazebo/model_states", model_states_qos,
+        [this] (const gazebo_msgs::msg::ModelStates::SharedPtr msg) { this->GazeboModelStatesCallback(msg); }
+    );
+    this->gazebo_model_states_subscriber_alt = this->create_subscription<gazebo_msgs::msg::ModelStates>(
+        "/model_states", model_states_qos,
+        [this] (const gazebo_msgs::msg::ModelStates::SharedPtr msg) { this->GazeboModelStatesCallback(msg); }
+    );
+    // Preferred source for robot world pose in ROS2: nav_msgs/Odometry from gazebo_ros_p3d plugin.
+    const auto odom_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+    this->nav_odom_subscriber = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/go2_gazebo/odom", odom_qos,
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->NavOdomCallback(msg); }
+    );
+    this->nav_odom_subscriber_alt = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/odom", odom_qos,
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->NavOdomCallback(msg); }
     );
     this->robot_state_subscriber = this->create_subscription<robot_msgs::msg::RobotState>(
         this->ros_namespace + "robot_joint_controller/state", rclcpp::SystemDefaultsQoS(),
@@ -633,6 +727,91 @@ void RL_Sim::RobotStateCallback(const robot_msgs::msg::RobotState::SharedPtr msg
     this->robot_state_subscriber_msg = *msg;
 }
 
+void RL_Sim::GazeboModelStatesCallback(const gazebo_msgs::msg::ModelStates::SharedPtr msg)
+{
+    if (!msg)
+    {
+        return;
+    }
+    const auto &names = msg->name;
+    const auto &poses = msg->pose;
+    if (names.size() != poses.size())
+    {
+        return;
+    }
+
+    size_t idx = static_cast<size_t>(-1);
+    auto pick_by_key = [&](const std::string &key) -> bool
+    {
+        if (key.empty()) return false;
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            if (names[i] == key)
+            {
+                idx = i;
+                return true;
+            }
+        }
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            if (names[i].find(key) != std::string::npos)
+            {
+                idx = i;
+                return true;
+            }
+        }
+        return false;
+    };
+    (void)pick_by_key(this->gazebo_model_name);
+    if (idx == static_cast<size_t>(-1)) (void)pick_by_key("robot_model");
+    if (idx == static_cast<size_t>(-1)) (void)pick_by_key(this->robot_name);
+    if (idx == static_cast<size_t>(-1)) (void)pick_by_key("robot");
+    if (idx == static_cast<size_t>(-1))
+    {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true))
+        {
+            std::cout << LOGGER::WARNING << "No matching model name in /gazebo/model_states; set gazebo_model_name param. First few names:";
+            for (size_t i = 0; i < std::min<size_t>(names.size(), 8); ++i) std::cout << " " << names[i];
+            std::cout << std::endl;
+        }
+        return;
+    }
+
+    const auto &p = poses[idx].position;
+    const auto &q = poses[idx].orientation;
+    const double yaw = QuaternionToYaw(q.x, q.y, q.z, q.w);
+    this->nav_base_world_x_.store(p.x);
+    this->nav_base_world_y_.store(p.y);
+    this->nav_base_world_z_.store(p.z);
+    this->nav_base_world_yaw_.store(yaw);
+    this->nav_base_world_qx_.store(q.x);
+    this->nav_base_world_qy_.store(q.y);
+    this->nav_base_world_qz_.store(q.z);
+    this->nav_base_world_qw_.store(q.w);
+    this->nav_base_world_valid_.store(true);
+}
+
+void RL_Sim::NavOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+{
+    if (!msg)
+    {
+        return;
+    }
+    const auto &p = msg->pose.pose.position;
+    const auto &q = msg->pose.pose.orientation;
+    const double yaw = QuaternionToYaw(q.x, q.y, q.z, q.w);
+    this->nav_base_world_x_.store(p.x);
+    this->nav_base_world_y_.store(p.y);
+    this->nav_base_world_z_.store(p.z);
+    this->nav_base_world_yaw_.store(yaw);
+    this->nav_base_world_qx_.store(q.x);
+    this->nav_base_world_qy_.store(q.y);
+    this->nav_base_world_qz_.store(q.z);
+    this->nav_base_world_qw_.store(q.w);
+    this->nav_base_world_valid_.store(true);
+}
+
 void RL_Sim::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
 {
     this->nav_goal_body_x_.store(msg->x);
@@ -641,6 +820,28 @@ void RL_Sim::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg
     this->nav_has_goal_.store(true);
     this->nav_goal_seq_.fetch_add(1);
     std::cout << LOGGER::INFO << "NavGoalBody: x=" << msg->x << " y=" << msg->y << " yaw=" << msg->theta << std::endl;
+
+    // Latch the goal in world using the robot pose at goal time so we can compute live goal_body each step
+    // like the training code (yaw-only).
+    if (this->nav_base_world_valid_.load())
+    {
+        const double rx = this->nav_base_world_x_.load();
+        const double ry = this->nav_base_world_y_.load();
+        const double ryaw = this->nav_base_world_yaw_.load();
+        const double c = std::cos(ryaw);
+        const double s = std::sin(ryaw);
+        const double gx = rx + c * msg->x - s * msg->y;
+        const double gy = ry + s * msg->x + c * msg->y;
+        const double gyaw = WrapToPi(ryaw + msg->theta);
+        this->nav_goal_world_x_.store(gx);
+        this->nav_goal_world_y_.store(gy);
+        this->nav_goal_world_yaw_.store(gyaw);
+        this->nav_goal_world_valid_.store(true);
+    }
+    else
+    {
+        this->nav_goal_world_valid_.store(false);
+    }
 
     // Best-effort visualization in Gazebo: place/update a marker in world.
     this->UpdateNavGoalMarker(msg->x, msg->y, msg->theta);
@@ -709,6 +910,53 @@ void RL_Sim::UpdateNavGoalMarker(double goal_body_x, double goal_body_y, double 
     (void)goal_body_x;
     (void)goal_body_y;
     (void)goal_body_yaw;
+#endif
+}
+
+void RL_Sim::UpdateNavPredMarker(double pred_body_x, double pred_body_y, double pred_body_yaw)
+{
+#if defined(USE_ROS2)
+    // Single marker (green) only, updated via delete+spawn.
+    if (!this->nav_goal_marker_delete_client || !this->nav_goal_marker_spawn_client)
+    {
+        return;
+    }
+    if (!this->nav_goal_marker_delete_client->service_is_ready() || !this->nav_goal_marker_spawn_client->service_is_ready())
+    {
+        return;
+    }
+
+    // Avoid building up an unbounded queue of delete/spawn requests at 10Hz.
+    static std::atomic<bool> inflight{false};
+    if (inflight.exchange(true))
+    {
+        return;
+    }
+
+    auto spawn_req = std::make_shared<gazebo_msgs::srv::SpawnEntity::Request>();
+    spawn_req->name = "nav_pred_marker";
+    spawn_req->xml = BuildNavPredMarkerSdf();
+    spawn_req->robot_namespace = "";
+    spawn_req->reference_frame = "robot_model";
+    spawn_req->initial_pose.position.x = pred_body_x;
+    spawn_req->initial_pose.position.y = pred_body_y;
+    spawn_req->initial_pose.position.z = 0.4;
+    spawn_req->initial_pose.orientation = YawToQuaternion(pred_body_yaw);
+
+    auto del_req = std::make_shared<gazebo_msgs::srv::DeleteEntity::Request>();
+    del_req->name = "nav_pred_marker";
+    (void)this->nav_goal_marker_delete_client->async_send_request(
+        del_req,
+        [this, spawn_req](rclcpp::Client<gazebo_msgs::srv::DeleteEntity>::SharedFuture)
+        {
+            (void)this->nav_goal_marker_spawn_client->async_send_request(
+                spawn_req,
+                [](rclcpp::Client<gazebo_msgs::srv::SpawnEntity>::SharedFuture) { inflight.store(false); });
+        });
+#else
+    (void)pred_body_x;
+    (void)pred_body_y;
+    (void)pred_body_yaw;
 #endif
 }
 
@@ -843,7 +1091,6 @@ bool RL_Sim::InitHierarchicalNav()
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
     if (config["clip_commands"]) this->nav_clip_commands_ = config["clip_commands"].as<double>();
-    if (config["momentum_factor"]) this->nav_momentum_ = config["momentum_factor"].as<double>();
     this->nav_timer_left_.store(this->nav_episode_length_s_);
     this->nav_time_io_.store(0.0);
 
@@ -875,9 +1122,9 @@ bool RL_Sim::InitHierarchicalNav()
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
-    const int hf_dim = 1 + 3 + 3 + dof + dof + dof + 4;
-    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof + 4;
-    const int obs_io_dim = 3 + 3 + 1 + 3 + 3 + dof + dof + dof + 4;
+    const int hf_dim = 1 + 3 + 3 + dof + dof + dof ;
+    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof;
+    const int obs_io_dim = 3 + 3 + 1 + 3 + 3 + dof + dof + dof;
 
     this->nav_highfreq_buf_ = ObservationBuffer(1, {hf_dim}, this->nav_highfreq_hist_len_, "time");
     this->nav_obs_hist_buf_ = ObservationBuffer(1, {obs_dim}, this->nav_obs_hist_len_, "time");
@@ -886,7 +1133,6 @@ bool RL_Sim::InitHierarchicalNav()
     this->nav_position_targets_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
     this->nav_spawn_positions_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
     this->nav_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
-    this->nav_momentum_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
     this->nav_last_actions_ = std::vector<float>(dof, 0.0f);
 
     this->nav_models_loaded_.store(true);
@@ -936,10 +1182,7 @@ void RL_Sim::UpdateHighFrequencyObs()
         }
     }
 
-    // no foot contact sensor in this stack: use neutral value 0.0 (equivalent to (0.5-0.5)/2)
-    torch::Tensor foot_contact = torch::zeros({1, 4}, torch::dtype(torch::kFloat32));
-
-    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions, foot_contact}, 1);
+    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions}, 1);
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
@@ -960,9 +1203,9 @@ void RL_Sim::UpdateHighFrequencyObs()
     const uint64_t goal_seq = this->nav_goal_seq_.load();
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
 
-    const double goal_body_x_in = this->nav_goal_body_x_.load();
-    const double goal_body_y_in = this->nav_goal_body_y_.load();
-    const double goal_body_yaw_in = this->nav_goal_body_yaw_.load();
+    const double goal_body_x_initial = this->nav_goal_body_x_.load();
+    const double goal_body_y_initial = this->nav_goal_body_y_.load();
+    const double goal_body_yaw_initial = this->nav_goal_body_yaw_.load();
 
     if (new_goal)
     {
@@ -970,13 +1213,62 @@ void RL_Sim::UpdateHighFrequencyObs()
         this->nav_timer_left_.store(this->nav_episode_length_s_);
         this->nav_time_io_.store(0.0);
         this->nav_high_command_.zero_();
-        this->nav_momentum_high_command_.zero_();
         this->nav_cmd_x_.store(0.0);
         this->nav_cmd_y_.store(0.0);
         this->nav_cmd_yaw_.store(0.0);
 
-        this->nav_position_targets_body_initial_ = torch::tensor({{static_cast<float>(goal_body_x_in), static_cast<float>(goal_body_y_in), static_cast<float>(goal_body_yaw_in)}});
+        // Initialize with goal body at goal time; will be overwritten by live goal_body if world goal is valid.
+        this->nav_position_targets_body_initial_ = torch::tensor({{
+            static_cast<float>(goal_body_x_initial),
+            static_cast<float>(goal_body_y_initial),
+            static_cast<float>(goal_body_yaw_initial),
+        }});
         this->nav_spawn_positions_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
+    }
+
+   
+    if (!this->nav_goal_world_valid_.load() && this->nav_base_world_valid_.load())
+    {
+        const double rx = this->nav_base_world_x_.load();
+        const double ry = this->nav_base_world_y_.load();
+        const double ryaw = this->nav_base_world_yaw_.load();
+        const double gbx0 = this->nav_goal_body_x_.load();
+        const double gby0 = this->nav_goal_body_y_.load();
+        const double gbyaw0 = this->nav_goal_body_yaw_.load();
+        const double c = std::cos(ryaw);
+        const double s = std::sin(ryaw);
+        const double gx = rx + c * gbx0 - s * gby0;
+        const double gy = ry + s * gbx0 + c * gby0;
+        const double gyaw = WrapToPi(ryaw + gbyaw0);
+        this->nav_goal_world_x_.store(gx);
+        this->nav_goal_world_y_.store(gy);
+        this->nav_goal_world_yaw_.store(gyaw);
+        this->nav_goal_world_valid_.store(true);
+    }
+
+    if (this->nav_goal_world_valid_.load() && this->nav_base_world_valid_.load())
+    {
+        const double rx = this->nav_base_world_x_.load();
+        const double ry = this->nav_base_world_y_.load();
+        const double ryaw = this->nav_base_world_yaw_.load();
+        const double gx = this->nav_goal_world_x_.load();
+        const double gy = this->nav_goal_world_y_.load();
+        const double gyaw = this->nav_goal_world_yaw_.load();
+
+        const double dx = gx - rx;
+        const double dy = gy - ry;
+        const double c = std::cos(-ryaw);
+        const double s = std::sin(-ryaw);
+        const double gbx = dx * c - dy * s;
+        const double gby = dx * s + dy * c;
+        const double gbyaw = WrapToPi(gyaw - ryaw);
+
+        if (this->nav_position_targets_body_initial_.defined() && this->nav_position_targets_body_initial_.numel() >= 3)
+        {
+            this->nav_position_targets_body_initial_[0][0] = static_cast<float>(gbx);
+            this->nav_position_targets_body_initial_[0][1] = static_cast<float>(gby);
+            this->nav_position_targets_body_initial_[0][2] = static_cast<float>(gbyaw);
+        }
     }
 
     const double timer_left = this->nav_timer_left_.load();
@@ -1021,8 +1313,6 @@ void RL_Sim::UpdateHighFrequencyObs()
             }
         }
     }
-    torch::Tensor foot_contact = torch::zeros({1, 4}, torch::dtype(torch::kFloat32));
-
     torch::Tensor high_command_scaled = this->nav_high_command_ * this->params.commands_scale.to(torch::kFloat32);
 
     torch::Tensor obs_frame = torch::cat({
@@ -1035,7 +1325,6 @@ void RL_Sim::UpdateHighFrequencyObs()
         dof_pos_term,
         dof_vel_term,
         actions,
-        foot_contact,
     }, 1);
 
     torch::Tensor obs_io_frame = torch::cat({
@@ -1047,7 +1336,6 @@ void RL_Sim::UpdateHighFrequencyObs()
         dof_pos_term,
         dof_vel_term,
         actions,
-        foot_contact,
     }, 1);
 
     if (new_goal)
@@ -1092,15 +1380,8 @@ void RL_Sim::UpdateHighFrequencyObs()
     }
 
     torch::Tensor cmd;
-    // Training inference (exported JIT):
-    //   vision_tokens = nav_vision_model_(depth)
-    //   actions, v, target_pos, spawn_pos = nav_high_model_(obs, obs_h, obs_history_io_buf, vision_tokens, io_high_frequency_history_buf)
-    // Here:
-    //   obs                 -> obs_frame (current frame)
-    //   obs_h               -> obs_hist (10-frame history of obs_frame, flattened)
-    //   obs_history_io_buf   -> obs_io_hist (10-frame history of obs_io_frame, flattened)
-    //   vision_tokens        -> vision_feat
-    //   io_high_frequency... -> hf_hist (20-frame history, flattened)
+    torch::Tensor pred_target_body;
+    
     torch::jit::IValue out;
     try
     {
@@ -1113,7 +1394,8 @@ void RL_Sim::UpdateHighFrequencyObs()
         return;
     }
 
-    // Unpack output: some models return a Tensor, some return a tuple where first element is actions/cmd.
+    // Unpack output: some models return a Tensor, some return a tuple/list:
+    //   (actions, v, target_pos, spawn_pos)
     try
     {
         if (out.isTensor())
@@ -1127,6 +1409,10 @@ void RL_Sim::UpdateHighFrequencyObs()
             {
                 cmd = elems[0].toTensor();
             }
+            if (elems.size() > 2 && elems[2].isTensor())
+            {
+                pred_target_body = elems[2].toTensor();
+            }
         }
         else if (out.isList())
         {
@@ -1134,6 +1420,10 @@ void RL_Sim::UpdateHighFrequencyObs()
             if (list.size() > 0 && list.get(0).isTensor())
             {
                 cmd = list.get(0).toTensor();
+            }
+            if (list.size() > 2 && list.get(2).isTensor())
+            {
+                pred_target_body = list.get(2).toTensor();
             }
         }
     }
@@ -1166,8 +1456,38 @@ void RL_Sim::UpdateHighFrequencyObs()
         std::cout << LOGGER::INFO
                   << "NavHigh raw:[" << rx << ", " << ry << ", " << rz << "]"
                   << " clipped:[" << cx << ", " << cy << ", " << cz << "]"
-                  << " goal_body:[" << goal_body_x_in << ", " << goal_body_y_in << ", " << goal_body_yaw_in << "]"
+                  << " goal_body_live:[" << this->nav_position_targets_body_initial_[0][0].item<double>()
+                  << ", " << this->nav_position_targets_body_initial_[0][1].item<double>()
+                  << ", " << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
                   << std::endl;
+
+        if (!this->nav_base_world_valid_.load())
+        {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true))
+            {
+                std::cout << LOGGER::WARNING
+                          << "No /model_states received; goal_body_live stays at initial until robot world pose is available."
+                          << std::endl;
+            }
+        }
+    }
+
+	    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
+	    {
+	        const double tx = pred_target_body[0][0].item<double>();
+	        const double ty = pred_target_body[0][1].item<double>();
+	        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
+
+        if (dbg_tick == 0 || new_goal)
+        {
+            std::cout << LOGGER::INFO
+                      << " NavPred body(robot_model):[" << tx << ", " << ty << ", " << tyaw << "]"
+                      << std::endl;
+        }
+
+        // Update markers at the same rate as high-level inference (typically 10Hz).
+        this->UpdateNavPredMarker(tx, ty, tyaw);
     }
 
     this->nav_cmd_x_.store(cmd[0][0].item<double>());
