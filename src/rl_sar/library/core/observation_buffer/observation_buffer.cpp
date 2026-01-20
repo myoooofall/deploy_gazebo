@@ -37,8 +37,21 @@ void ObservationBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_obs
         indices.push_back(torch::indexing::Slice(idx));
     }
     obs_buf.index_put_(indices, new_obs.repeat({1, history_length}));
-    // reset后，如果所有环境都被reset，则重置initialized标志
-    // 这里简化处理：reset后保持initialized状态，因为buffer已经被填充了
+   
+}
+
+void ObservationBuffer::reset_from_0(std::vector<int> reset_idxs, torch::Tensor new_obs)
+{
+
+    const auto idx_tensor =
+        torch::tensor(reset_idxs, torch::TensorOptions().dtype(torch::kLong).device(obs_buf.device()));
+
+    // Zero all history for selected envs, then write only the latest frame.
+    obs_buf.index_put_({idx_tensor, torch::indexing::Slice()}, 0.0f);
+    const int start = num_obs * (history_length - 1);
+    obs_buf.index_put_(
+        {idx_tensor, torch::indexing::Slice(start, start + num_obs)},
+        new_obs.to(obs_buf.device(), obs_buf.scalar_type()));
 }
 
 void ObservationBuffer::insert(torch::Tensor new_obs)

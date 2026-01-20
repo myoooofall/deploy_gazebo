@@ -16,6 +16,8 @@ public:
     ObservationBuffer();
 
     void reset(std::vector<int> reset_idxs, torch::Tensor new_obs);
+    // Reset selected env rows to all-zeros history, then write `new_obs` only into the latest frame slot.
+    void reset_from_0(std::vector<int> reset_idxs, torch::Tensor new_obs);
     void insert(torch::Tensor new_obs);
     torch::Tensor get_obs_vec(std::vector<int> obs_ids);
 

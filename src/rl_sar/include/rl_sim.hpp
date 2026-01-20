@@ -77,7 +77,7 @@ public:
     std::shared_ptr<LoopFunc> loop_keyboard;
     std::shared_ptr<LoopFunc> loop_control;
     std::shared_ptr<LoopFunc> loop_rl;
-    std::shared_ptr<LoopFunc> loop_high;
+    std::shared_ptr<LoopFunc> loop_navi;
     std::shared_ptr<LoopFunc> loop_plot;
 
     // plot
@@ -175,7 +175,7 @@ public:
     std::atomic<double> nav_goal_body_x_{0.0};
     std::atomic<double> nav_goal_body_y_{0.0};
     std::atomic<double> nav_goal_body_yaw_{0.0};
-    // goal in world (latched from body goal + robot pose at goal time), used to compute live goal_body like training code
+    // Goal in world (latched from body goal + robot pose at goal time); used for evaluation/visualization.
     std::atomic<double> nav_goal_world_x_{0.0};
     std::atomic<double> nav_goal_world_y_{0.0};
     std::atomic<double> nav_goal_world_yaw_{0.0};
@@ -218,7 +218,10 @@ public:
     torch::Tensor nav_high_command_;
 
     std::atomic<uint64_t> nav_active_goal_seq_{0};
+    // Time since current nav episode start for high-level policy (10Hz, advanced by nav_dt_).
     std::atomic<double> nav_time_io_{0.0};
+    // Time since current nav episode start for high-frequency buffer (advanced by params.dt).
+    std::atomic<double> nav_time_io_hf_{0.0};
     std::atomic<double> nav_timer_left_{0.0};
 
     std::mutex nav_last_actions_mutex_;
