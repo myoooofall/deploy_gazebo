@@ -30,6 +30,9 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                                             gyro_fps:=400
 
                                             clip_distance:=-1.0
+                                            near_clip:=0.1
+                                            range_min_depth:=0.1
+                                            pointcloud_cutoff:=0.1
                                             depth_width:=1280
                                             depth_height:=720
                                             depth_fps:=30
@@ -67,7 +70,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                         <format>RGB_INT8</format>
                     </image>
                     <clip>
-                        <near>0.1</near>
+                        <near>${near_clip}</near>
                         <far>100</far>
                     </clip>
                     <noise>
@@ -89,7 +92,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                         <format>L_INT8</format>
                     </image>
                     <clip>
-                        <near>0.1</near>
+                        <near>${near_clip}</near>
                         <far>100</far>
                     </clip>
                     <noise>
@@ -111,7 +114,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                         <format>L_INT8</format>
                     </image>
                     <clip>
-                        <near>0.1</near>
+                        <near>${near_clip}</near>
                         <far>100</far>
                     </clip>
                     <noise>
@@ -142,7 +145,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                         </image>
                     </xacro:if>
                     <clip>
-                        <near>0.1</near>
+                        <near>${near_clip}</near>
                         <xacro:unless value="${clip_distance > 0.0}">
                             <far>2.0</far>
                         </xacro:unless>
@@ -204,7 +207,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                 <infrared1OpticalframeName>${infrared1_optical_frame}</infrared1OpticalframeName>
                 <infrared2OpticalframeName>${infrared2_optical_frame}</infrared2OpticalframeName>
                 <!-- Depth camera settings -->
-                <rangeMinDepth>0.1</rangeMinDepth>
+                <rangeMinDepth>${range_min_depth}</rangeMinDepth>
                 <xacro:unless value="${clip_distance > 0.0}">
                     <rangeMaxDepth>2.0</rangeMaxDepth>
                 </xacro:unless>
@@ -226,7 +229,7 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                 <!-- Pointlcloud settings -->
                 <pointCloud>${enable_pointCloud}</pointCloud>
                 <pointCloudTopicName>depth/color/points</pointCloudTopicName>
-                <pointCloudCutoff>0.5</pointCloudCutoff>
+                <pointCloudCutoff>${pointcloud_cutoff}</pointCloudCutoff>
                 <!-- <ros>
                     <namespace>/camera</namespace>
                 </ros> -->

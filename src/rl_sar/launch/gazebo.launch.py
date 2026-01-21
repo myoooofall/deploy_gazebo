@@ -10,6 +10,8 @@ from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, Opaq
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, TextSubstitution, Command
+from launch.actions import RegisterEventHandler
+from launch.event_handlers import OnProcessExit
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory, get_package_prefix
@@ -97,7 +99,12 @@ def generate_launch_description():
     joint_state_broadcaster_node = Node(
         package="controller_manager",
         executable='spawner.py' if os.environ.get('ROS_DISTRO', '') == 'foxy' else 'spawner',
-        arguments=["joint_state_broadcaster"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout", "60",
+            "--service-call-timeout", "60",
+            "--switch-timeout", "60",
+        ],
         output="screen",
     )
 
@@ -244,7 +251,12 @@ def generate_launch_description():
         gazebo_server,
         gazebo_client,
         spawn_entity,
-        joint_state_broadcaster_node,
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=spawn_entity,
+                on_exit=[joint_state_broadcaster_node],
+            )
+        ),
         # robot_joint_controller_node,  # Spawn in rl_sim.cpp
         joy_node,
         param_node,

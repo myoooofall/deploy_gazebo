@@ -409,8 +409,12 @@ void RL_Sim::StartJointController(const std::string& ros_namespace, const std::v
             throw std::runtime_error("Failed to create temporary parameter file");
         }
 
+        // controller_manager is running at "/controller_manager" (no namespace),
+        // so the controller node name is "/robot_joint_controller".
         tmp_file << "/robot_joint_controller:\n";
         tmp_file << "    ros__parameters:\n";
+        // Ensure controller type is available even if controller_manager didn't preload it from a base yaml.
+        tmp_file << "        type: robot_joint_controller/RobotJointControllerGroup\n";
         tmp_file << "        joints:\n";
         for (const auto& name : names)
         {
@@ -422,7 +426,12 @@ void RL_Sim::StartJointController(const std::string& ros_namespace, const std::v
     pid_t pid_unload = fork();
     if (pid_unload == 0)
     {
-        std::string unload_cmd = "ros2 run controller_manager unspawner robot_joint_controller 2>/dev/null || true";
+        std::string unload_cmd =
+            "ROS_LOG_DIR=/tmp/roslog "
+            "ros2 run controller_manager unspawner robot_joint_controller "
+            "-c /controller_manager "
+            "--switch-timeout 60 "
+            "2>/dev/null || true";
         execlp("sh", "sh", "-c", unload_cmd.c_str(), nullptr);
         exit(0);
     }
@@ -437,8 +446,14 @@ void RL_Sim::StartJointController(const std::string& ros_namespace, const std::v
     pid_t pid = fork();
     if (pid == 0)
     {
-        std::string cmd = "ros2 run controller_manager " + spawner + " robot_joint_controller ";
-        cmd += "-p " + tmp_path.string() + " ";
+        std::string cmd =
+            "ROS_LOG_DIR=/tmp/roslog "
+            "ros2 run controller_manager " + spawner + " robot_joint_controller "
+            "-c /controller_manager "
+            "--controller-manager-timeout 60 "
+            "--service-call-timeout 60 "
+            "--switch-timeout 60 "
+            "-p " + tmp_path.string() + " ";
         // cmd += " > /dev/null 2>&1";  // Comment this line to see the output
         execlp("sh", "sh", "-c", cmd.c_str(), nullptr);
         exit(1);
