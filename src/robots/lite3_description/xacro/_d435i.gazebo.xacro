@@ -30,9 +30,9 @@ This is the Gazebo URDF model for the Intel RealSense D435i camera
                                             gyro_fps:=400
 
                                             clip_distance:=-1.0
-                                            near_clip:=0.01
-                                            range_min_depth:=0.01
-                                            pointcloud_cutoff:=0.01
+                                            near_clip:=0.001
+                                            range_min_depth:=0.001
+                                            pointcloud_cutoff:=0.001
                                             depth_width:=1280
                                             depth_height:=720
                                             depth_fps:=30

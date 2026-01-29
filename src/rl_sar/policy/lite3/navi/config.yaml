@@ -1,8 +1,14 @@
-# Copyright (c) 2024-2025 Yuxuan Ma
+# Copyright (c) 2024-2025 Ziqi Fan
 # SPDX-License-Identifier: Apache-2.0
 
-lite3/himloco:
-  model_name: "policy_6_11.pt"
+lite3/navi:
+  model_name: "himloco.pt"
+  high_model_name: "lite3_navi_high.pt"
+  vision_model_name: "lite3_navi_vision.pt"
+  nav_dt: 0.1
+  nav_episode_length_s: 30.0
+  clip_commands: 5.0
+  momentum_factor: 0.95
   num_observations: 45
   observations: ["commands", "ang_vel", "gravity_vec", "dof_pos", "dof_vel", "actions"]
   observations_history: [0, 1, 2, 3, 4, 5]  # 0 is the latest observation
