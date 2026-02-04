@@ -68,7 +68,13 @@ run_cmake_build() {
     print_warning "NOTE: CMake build is for hardware deployment only, not for simulation."
     print_separator
 
-    cmake src/rl_sar/ -B cmake_build -DUSE_CMAKE=ON
+    cmake src/rl_sar/ -B cmake_build \
+        -DUSE_CMAKE=ON \
+        -DTorch_DIR=/home/ysc/.local/lib/python3.8/site-packages/torch/share/cmake/Torch \
+        -DPython3_EXECUTABLE=/usr/bin/python3.8 \
+        -DPython3_INCLUDE_DIR=/usr/include/python3.8 \
+        -DPython3_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.8.so
+    
     cmake --build cmake_build -j4
 
     print_success "CMake build completed!"
@@ -93,6 +99,9 @@ run_ros_build() {
         create_symlinks_for_specific_packages "${packages[@]}"
     fi
 
+    # 路径硬编码修复
+    local EXTRA_CMAKE_ARGS="-DTorch_DIR=/home/ysc/.local/lib/python3.8/site-packages/torch/share/cmake/Torch -DPython3_EXECUTABLE=/usr/bin/python3.8 -DPython3_INCLUDE_DIR=/usr/include/python3.8 -DPython3_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.8.so"
+
     # Execute build
     if [ ${#packages[@]} -eq 0 ]; then
         if [[ "$ROS_DISTRO" == "noetic" ]]; then
@@ -102,7 +111,7 @@ run_ros_build() {
         else
             print_header "[Using colcon build]"
             print_info "Building all packages..."
-            colcon build --merge-install --symlink-install
+            colcon build --merge-install --symlink-install --cmake-args $EXTRA_CMAKE_ARGS
         fi
     else
         if [[ "$ROS_DISTRO" == "noetic" ]]; then
@@ -112,7 +121,7 @@ run_ros_build() {
         else
             print_header "[Using colcon build]"
             print_info "Building specific packages: $package_list"
-            colcon build --merge-install --symlink-install --packages-select $package_list
+            colcon build --merge-install --symlink-install --packages-select $package_list --cmake-args $EXTRA_CMAKE_ARGS
         fi
     fi
 
@@ -128,56 +137,6 @@ clean_workspace() {
 
     print_header "[Cleaning Workspace]"
 
-    # Show what will be cleaned
-    print_info "The following will be cleaned:"
-    if [ ${#packages[@]} -eq 0 ]; then
-        echo "  - All package.xml symlinks in directory src/"
-    else
-        echo "  - Package.xml symlinks for: ${packages[*]}"
-    fi
-    echo "  - directory build/"
-    echo "  - directory devel/"
-    echo "  - directory install/"
-    echo "  - directory log/"
-    echo "  - directory logs/"
-    echo "  - directory .catkin_tools/"
-
-    # Ask for confirmation
-    if [ ${#packages[@]} -eq 0 ]; then
-        if ! ask_confirmation "Are you sure you want to clean ALL symlinks and build artifacts?"; then
-            print_warning "Clean operation cancelled."
-            exit 0
-        fi
-    else
-        if ! ask_confirmation "Are you sure you want to clean symlinks for specified packages and build artifacts?"; then
-            print_warning "Clean operation cancelled."
-            exit 0
-        fi
-    fi
-
-    # Remove package.xml symlinks
-    if [ ${#packages[@]} -eq 0 ]; then
-        print_info "Removing all package.xml symlinks..."
-        find src -name "package.xml" -type l -delete
-        print_success "Removed all symlinks"
-    else
-        print_info "Removing symlinks for specific packages..."
-        for package_name in "${packages[@]}"; do
-            package_dir=$(find src -name "$package_name" -type d | head -n 1)
-            if [ -n "$package_dir" ]; then
-                if [ -L "$package_dir/package.xml" ]; then
-                    rm -f "$package_dir/package.xml"
-                    print_success "Removed symlink from $package_name"
-                else
-                    print_warning "No symlink found for $package_name"
-                fi
-            else
-                print_error "Package '$package_name' not found in src directory"
-            fi
-        done
-    fi
-
-    # Clean build artifacts
     print_info "Cleaning build artifacts..."
     rm -rf build/ devel/ install/ log/ logs/ .catkin_tools/
 
@@ -203,12 +162,7 @@ clean_existing_symlinks() {
                 removed_packages+=("$package_name")
             fi
         done
-
-        if [ ${#removed_packages[@]} -gt 0 ]; then
-            print_success "Removed existing symlinks from: ${removed_packages[*]}"
-        else
-            print_warning "No existing symlinks found"
-        fi
+        print_success "Removed existing symlinks from: ${removed_packages[*]}"
     fi
 }
 
@@ -218,25 +172,12 @@ clean_existing_symlinks() {
 
 detect_incompatible_build_artifacts() {
     print_header "[Checking for Incompatible Build Artifacts]"
-
     local needs_cleanup=false
-
-    # Check for ROS1 artifacts when using ROS2
     if [[ "$ROS_DISTRO" != "noetic" ]]; then
         if [ -d "devel" ] || [ -d ".catkin_tools" ]; then
-            print_warning "Found ROS1 build artifacts (devel/ or .catkin_tools/) while using ROS2. Cleaning workspace..."
             needs_cleanup=true
         fi
     fi
-
-    # Check for ROS2 artifacts when using ROS1
-    if [[ "$ROS_DISTRO" == "noetic" ]]; then
-        if [ -d "install" ] || [ -d "log" ]; then
-            print_warning "Found ROS2 build artifacts (install/ or log/) while using ROS1. Cleaning workspace..."
-            needs_cleanup=true
-        fi
-    fi
-
     if [ "$needs_cleanup" = true ]; then
         clean_workspace
     else
@@ -246,21 +187,15 @@ detect_incompatible_build_artifacts() {
 
 create_symlinks_for_package() {
     local package_dir="$1"
-    local package_name=$(basename "$package_dir")
-
     if [ -d "$package_dir" ]; then
         if [ -f "$package_dir/package.ros1.xml" ] && [ -f "$package_dir/package.ros2.xml" ]; then
             [ -e "$package_dir/package.xml" ] && rm -f "$package_dir/package.xml"
-
             if [[ "$ROS_DISTRO" == "noetic" ]]; then
                 ln -s package.ros1.xml "$package_dir/package.xml"
                 return 0
             elif [[ "$ROS_DISTRO" == "foxy" || "$ROS_DISTRO" == "humble" ]]; then
                 ln -s package.ros2.xml "$package_dir/package.xml"
                 return 0
-            else
-                print_error "Unknown ROS version: $ROS_DISTRO"
-                return 1
             fi
         fi
     fi
@@ -269,7 +204,6 @@ create_symlinks_for_package() {
 
 create_symlinks_for_all_packages() {
     print_header "[Creating Symlinks for All Packages]"
-
     created_packages=()
     while IFS= read -r -d '' package_dir; do
         package_dir=$(dirname "$package_dir")
@@ -278,20 +212,12 @@ create_symlinks_for_all_packages() {
             created_packages+=("$package_name")
         fi
     done < <(find src -name "package.ros1.xml" -print0)
-
-    if [ ${#created_packages[@]} -gt 0 ]; then
-        print_success "Created symlinks for: ${created_packages[*]}"
-    else
-        print_warning "No packages with dual ROS support found"
-    fi
+    print_success "Created symlinks for: ${created_packages[*]}"
 }
 
 create_symlinks_for_specific_packages() {
     local packages=("$@")
-
     print_header "[Creating Symlinks for Specific Packages]"
-    print_info "Packages to process: ${packages[*]}"
-
     created_packages=()
     for package_name in "${packages[@]}"; do
         package_dir=$(find src -name "$package_name" -type d | head -n 1)
@@ -299,70 +225,29 @@ create_symlinks_for_specific_packages() {
             created_packages+=("$package_name")
         fi
     done
-
-    if [ ${#created_packages[@]} -gt 0 ]; then
-        print_success "Created symlinks for: ${created_packages[*]}"
-    fi
 }
 
-# ========================
-# Main Script
-# ========================
-
 show_usage() {
-    print_header "[Build System Usage]"
-    print_header
-    echo -e "Usage: $0 [OPTIONS] [PACKAGE_NAMES...]"
-    echo ""
-    echo -e "${COLOR_INFO}Options:${COLOR_RESET}"
-    echo -e "  -c, --clean    Clean workspace (remove symlinks and build artifacts)"
-    echo -e "  -m, --cmake    Build using CMake (for hardware deployment only)"
-    echo -e "  -h, --help     Show this help message"
-    echo ""
-    echo -e "${COLOR_INFO}Examples:${COLOR_RESET}"
-    echo -e "  $0                    # Build all ROS packages"
-    echo -e "  $0 package1 package2  # Build specific ROS packages"
-    echo -e "  $0 -c                 # Clean all symlinks and build artifacts"
-    echo -e "  $0 --clean package1   # Clean specific package and build artifacts"
-    echo -e "  $0 -m                 # Build with CMake for hardware deployment"
+    echo "Usage: $0 [OPTIONS] [PACKAGE_NAMES...]"
+    echo "  -c, --clean    Clean workspace"
+    echo "  -m, --cmake    Build using CMake"
 }
 
 main() {
     local packages=()
     local clean_mode=false
     local cmake_mode=false
-
-    # Parse command line arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             -c|--clean) clean_mode=true; shift ;;
             -m|--cmake) cmake_mode=true; shift ;;
             -h|--help) show_usage; exit 0 ;;
-            --) shift; packages+=("$@"); break ;;
-            -*) print_error "Unknown option: $1"; show_usage; exit 1 ;;
             *) packages+=("$1"); shift ;;
         esac
     done
-
-    # Handle CMake build mode
-    if [ "$cmake_mode" = true ]; then
-        run_cmake_build
-        exit 0
-    fi
-
-    # Handle clean mode
-    if [ "$clean_mode" = true ]; then
-        clean_workspace "${packages[@]}"
-        exit 0
-    fi
-
-    # Handle ROS build
-    if [ -z "$ROS_DISTRO" ]; then
-        print_error "ROS environment not detected. Please source your ROS setup.bash first."
-        print_info "For hardware deployment, use the --cmake option instead."
-        exit 1
-    fi
-
+    if [ "$cmake_mode" = true ]; then run_cmake_build; exit 0; fi
+    if [ "$clean_mode" = true ]; then clean_workspace "${packages[@]}"; exit 0; fi
+    if [ -z "$ROS_DISTRO" ]; then print_error "Source ROS first!"; exit 1; fi
     run_ros_build "${packages[@]}"
 }
 
