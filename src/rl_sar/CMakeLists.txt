@@ -275,6 +275,8 @@ if(NOT USE_CMAKE)
         ament_target_dependencies(rl_real_lite3
             rclcpp
             geometry_msgs
+            nav_msgs
+            sensor_msgs
         )
         install(TARGETS rl_real_lite3 DESTINATION lib/${PROJECT_NAME})
     endif()
