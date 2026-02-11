@@ -20,6 +20,12 @@
 #include "receiver.h"
 #include "robot_types.h"
 #include <cmath>
+#include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
 
 //Retroid Gamepad
 #include "gamepad.h"
@@ -31,7 +37,9 @@
 #include <geometry_msgs/Twist.h>
 #elif defined(USE_ROS2) && defined(USE_ROS)
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/pose2_d.hpp>
 #endif
 
 #include "matplotlibcpp.h"
@@ -59,6 +67,7 @@ private:
     std::shared_ptr<LoopFunc> loop_control;
     std::shared_ptr<LoopFunc> loop_udpRecv;
     std::shared_ptr<LoopFunc> loop_rl;
+    std::shared_ptr<LoopFunc> loop_navi;
     std::shared_ptr<LoopFunc> loop_plot;
 
     // plot
@@ -74,16 +83,86 @@ private:
     RobotData* robot_data_=nullptr;
     void UDPRecv();
     void EulerToQuaternion(float roll, float pitch, float yaw, float q[4]);
+    void HandleKeyboard();
 
     //Retroid Gamepad
     std::shared_ptr<RetroidGamepad> gamepad_ptr_;
     RetroidKeys rt_keys_record_, rt_keys_;
     bool first_flag_;
 
+    // hierarchical navigation (high-level policy @ 10Hz)
+    void RunHighLevel();
+    bool InitHierarchicalNav();
+    void UpdateHighFrequencyObs();
+    void StartNavGoalInput();
+    void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
+
+    // nav state shared across loops
+    std::atomic<bool> nav_enabled_{false};
+    std::atomic<bool> nav_models_loaded_{false};
+    std::atomic<bool> nav_has_goal_{false};
+    std::atomic<uint64_t> nav_goal_seq_{0};
+
+    std::atomic<double> nav_goal_body_x_{0.0};
+    std::atomic<double> nav_goal_body_y_{0.0};
+    std::atomic<double> nav_goal_body_yaw_{0.0};
+
+    std::atomic<double> nav_cmd_x_{0.0};
+    std::atomic<double> nav_cmd_y_{0.0};
+    std::atomic<double> nav_cmd_yaw_{0.0};
+    std::atomic<bool> nav_goal_input_active_{false};
+    std::atomic<bool> nav_enable_request_{false};
+
+    // buffers and models (guarded as needed)
+    torch::jit::script::Module nav_high_model_;
+    torch::jit::script::Module nav_vision_model_;
+    std::string nav_config_path_;
+    std::string nav_high_model_path_;
+    std::string nav_vision_model_path_;
+
+    int nav_obs_hist_len_ = 10;
+    int nav_obs_io_hist_len_ = 10;
+    int nav_highfreq_hist_len_ = 20;
+    double nav_dt_ = 0.1;               // 10Hz
+    double nav_episode_length_s_ = 30;  // default if not specified
+    double nav_clip_commands_ = 3.0;    // default clip
+
+    std::mutex nav_highfreq_mutex_;
+    std::mutex nav_state_mutex_;
+    ObservationBuffer nav_highfreq_buf_;
+    ObservationBuffer nav_obs_hist_buf_;
+    ObservationBuffer nav_obs_io_hist_buf_;
+
+    torch::Tensor nav_position_targets_body_initial_;
+    torch::Tensor nav_spawn_positions_body_initial_;
+    torch::Tensor nav_high_command_;
+
+    std::atomic<uint64_t> nav_active_goal_seq_{0};
+    // Time since current nav episode start for high-level policy (10Hz, advanced by nav_dt_).
+    std::atomic<double> nav_time_io_{0.0};
+    // Time since current nav episode start for high-frequency buffer (advanced by params.dt).
+    std::atomic<double> nav_time_io_hf_{0.0};
+    std::atomic<double> nav_timer_left_{0.0};
+
+    std::mutex nav_last_actions_mutex_;
+    std::vector<float> nav_last_actions_;
+
     // others
     int motiontime = 0;
     std::vector<double> mapped_joint_positions;
     std::vector<double> mapped_joint_velocities;
+
+#if defined(USE_ROS2) && defined(USE_ROS)
+    // depth
+    int motion_time = 1;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
+    void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
+
+    // nav interface
+    rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr nav_goal_body_subscriber;
+    void NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg);
+#endif
 
 #if defined(USE_ROS1) && defined(USE_ROS)
     geometry_msgs::Twist cmd_vel;
