@@ -47,7 +47,7 @@ RL_Real::RL_Real()
     // Network init
     int local_port = 43987;
     int robot_port = 43893;
-    std::string robot_ip = "192.168.2.1";
+    std::string robot_ip = "192.168.1.120";
     // init robot
     this->receiver_ = new Receiver();
     this->sender_ = new Sender(robot_ip, robot_port);
