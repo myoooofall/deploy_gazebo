@@ -84,7 +84,7 @@ RL_Real::RL_Real()
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-        depth_buffer = DepthBuffer(1, 60, 86, 3);  // 1个环境，3帧历史，最终尺寸60x86 (height=60, width=86)
+        depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史 -> 推理用1帧（丢弃最新帧形成一帧延迟）
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
