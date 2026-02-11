@@ -5,12 +5,7 @@
 
 #include "rl_real_lite3.hpp"
 
-static double QuaternionToYaw(double x, double y, double z, double w)
-{
-    const double siny_cosp = 2.0 * (w * z + x * y);
-    const double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
-    return std::atan2(siny_cosp, cosy_cosp);
-}
+#include <sstream>
 
 static double WrapToPi(double a)
 {
@@ -78,13 +73,6 @@ RL_Real::RL_Real()
     this->gamepad_ptr_->StartDataThread();
 
 #if defined(USE_ROS2) && defined(USE_ROS)
-    // Preferred source for robot world pose (optional): nav_msgs/Odometry.
-    const auto odom_qos = rclcpp::QoS(rclcpp::KeepLast(10));
-    this->nav_odom_subscriber = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", odom_qos,
-        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->NavOdomCallback(msg); }
-    );
-
     // hierarchical navigation: body-frame goal only (no odom dependency)
     this->nav_goal_body_subscriber = this->create_subscription<geometry_msgs::msg::Pose2D>(
         "/nav_goal_body", rclcpp::SystemDefaultsQoS(),
@@ -104,7 +92,7 @@ RL_Real::RL_Real()
 
     // loop
     this->loop_udpRecv = std::make_shared<LoopFunc>("loop_udpRecv", 0.002, std::bind(&RL_Real::UDPRecv, this), 3);
-    this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::KeyboardInterface, this));
+    this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::HandleKeyboard, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
     this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.dt * this->params.decimation, std::bind(&RL_Real::RunModel, this));
     this->loop_navi = std::make_shared<LoopFunc>("loop_nav", this->nav_dt_, std::bind(&RL_Real::RunHighLevel, this));
@@ -224,9 +212,95 @@ void RL_Real::SetCommand(const RobotCommand<double> *command)
     this->sender_->SendCmd(robot_joint_cmd_);
 }
 
+void RL_Real::HandleKeyboard()
+{
+    if (this->nav_goal_input_active_.load())
+    {
+        return;
+    }
+
+    this->KeyboardInterface();
+
+    if (this->control.current_keyboard == Input::Keyboard::G)
+    {
+        this->StartNavGoalInput();
+        this->control.current_keyboard = this->control.last_keyboard;
+    }
+}
+
+void RL_Real::SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source)
+{
+    const double yaw_wrapped = WrapToPi(goal_yaw);
+    this->nav_goal_body_x_.store(goal_x);
+    this->nav_goal_body_y_.store(goal_y);
+    this->nav_goal_body_yaw_.store(yaw_wrapped);
+    this->nav_has_goal_.store(true);
+    this->nav_goal_seq_.fetch_add(1);
+    this->nav_enable_request_.store(true);
+
+    std::cout << LOGGER::INFO
+              << "NavGoalBody(" << (source ? source : "unknown") << "): x=" << goal_x
+              << " y=" << goal_y << " yaw=" << yaw_wrapped << std::endl;
+}
+
+void RL_Real::StartNavGoalInput()
+{
+    if (this->nav_goal_input_active_.exchange(true))
+    {
+        std::cout << LOGGER::WARNING << "Goal input already active." << std::endl;
+        return;
+    }
+
+    std::thread([this]() {
+        std::cout << LOGGER::INFO
+                  << "[NAV] Input goal in body frame: x y yaw(rad), then Enter."
+                  << std::endl;
+
+        std::string line;
+        if (!std::getline(std::cin, line))
+        {
+            std::cout << LOGGER::WARNING << "[NAV] Read goal input failed." << std::endl;
+            this->nav_goal_input_active_.store(false);
+            return;
+        }
+        if (line.empty())
+        {
+            if (!std::getline(std::cin, line))
+            {
+                std::cout << LOGGER::WARNING << "[NAV] Empty goal input." << std::endl;
+                this->nav_goal_input_active_.store(false);
+                return;
+            }
+        }
+
+        std::istringstream iss(line);
+        double x = 0.0;
+        double y = 0.0;
+        double yaw = 0.0;
+        if (!(iss >> x >> y >> yaw))
+        {
+            std::cout << LOGGER::WARNING
+                      << "[NAV] Invalid format. Expect: x y yaw(rad)."
+                      << std::endl;
+            this->nav_goal_input_active_.store(false);
+            return;
+        }
+
+        this->SetNavGoalBody(x, y, yaw, "keyboard");
+        this->nav_goal_input_active_.store(false);
+    }).detach();
+}
+
 void RL_Real::RobotControl()
 {
     this->motiontime++;
+
+    if (this->nav_enable_request_.exchange(false))
+    {
+        this->control.navigation_mode = true;
+        this->nav_enabled_.store(true);
+        std::cout << LOGGER::INFO << "Navigation mode: ON (goal latched)" << std::endl;
+    }
 
     if (this->nav_enabled_.load() && this->nav_models_loaded_.load())
     {
@@ -428,74 +502,11 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     this->motion_time++;
 }
 
-void RL_Real::NavOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
-{
-    if (!msg)
-    {
-        return;
-    }
-    const auto &p = msg->pose.pose.position;
-    const auto &q = msg->pose.pose.orientation;
-    const double yaw = QuaternionToYaw(q.x, q.y, q.z, q.w);
-    this->nav_base_world_x_.store(p.x);
-    this->nav_base_world_y_.store(p.y);
-    this->nav_base_world_z_.store(p.z);
-    this->nav_base_world_yaw_.store(yaw);
-    this->nav_base_world_qx_.store(q.x);
-    this->nav_base_world_qy_.store(q.y);
-    this->nav_base_world_qz_.store(q.z);
-    this->nav_base_world_qw_.store(q.w);
-    this->nav_base_world_valid_.store(true);
-}
-
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
 {
-    this->nav_goal_body_x_.store(msg->x);
-    this->nav_goal_body_y_.store(msg->y);
-    this->nav_goal_body_yaw_.store(msg->theta);
-    this->nav_has_goal_.store(true);
-    this->nav_goal_seq_.fetch_add(1);
-    std::cout << LOGGER::INFO << "NavGoalBody: x=" << msg->x << " y=" << msg->y << " yaw=" << msg->theta << std::endl;
-
-    // Latch the goal in world using the robot pose at goal time so we can compute live goal_body each step
-    // like the training code (yaw-only).
-    if (this->nav_base_world_valid_.load())
-    {
-        const double rx = this->nav_base_world_x_.load();
-        const double ry = this->nav_base_world_y_.load();
-        const double ryaw = this->nav_base_world_yaw_.load();
-        const double c = std::cos(ryaw);
-        const double s = std::sin(ryaw);
-        const double gx = rx + c * msg->x - s * msg->y;
-        const double gy = ry + s * msg->x + c * msg->y;
-        const double gyaw = WrapToPi(ryaw + msg->theta);
-        this->nav_goal_world_x_.store(gx);
-        this->nav_goal_world_y_.store(gy);
-        this->nav_goal_world_yaw_.store(gyaw);
-        this->nav_goal_world_valid_.store(true);
-    }
-    else
-    {
-        this->nav_goal_world_valid_.store(false);
-    }
-
-    this->UpdateNavGoalMarker(msg->x, msg->y, msg->theta);
+    this->SetNavGoalBody(msg->x, msg->y, msg->theta, "ros_topic");
 }
 #endif
-
-void RL_Real::UpdateNavGoalMarker(double goal_body_x, double goal_body_y, double goal_body_yaw)
-{
-    (void)goal_body_x;
-    (void)goal_body_y;
-    (void)goal_body_yaw;
-}
-
-void RL_Real::UpdateNavPredMarker(double pred_body_x, double pred_body_y, double pred_body_yaw)
-{
-    (void)pred_body_x;
-    (void)pred_body_y;
-    (void)pred_body_yaw;
-}
 
 bool RL_Real::InitHierarchicalNav()
 {
@@ -640,8 +651,8 @@ void RL_Real::UpdateHighFrequencyObs()
     }
 }
 
-	void RL_Real::RunHighLevel()
-	{
+void RL_Real::RunHighLevel()
+{
     if (!this->nav_models_loaded_.load() || !this->nav_enabled_.load())
     {
         return;
@@ -654,76 +665,32 @@ void RL_Real::UpdateHighFrequencyObs()
     const uint64_t goal_seq = this->nav_goal_seq_.load();
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
 
-	    const double goal_body_x_initial = this->nav_goal_body_x_.load();
-	    const double goal_body_y_initial = this->nav_goal_body_y_.load();
-	    const double goal_body_yaw_initial = this->nav_goal_body_yaw_.load();
+    const double goal_body_x_initial = this->nav_goal_body_x_.load();
+    const double goal_body_y_initial = this->nav_goal_body_y_.load();
+    const double goal_body_yaw_initial = this->nav_goal_body_yaw_.load();
 
-		    if (new_goal)
-		    {
-		        this->nav_active_goal_seq_.store(goal_seq);
-		        this->nav_timer_left_.store(this->nav_episode_length_s_);
-			        this->nav_time_io_.store(0.0);
-			        this->nav_time_io_hf_.store(0.0);
-		        this->nav_goal_world_valid_.store(false);
-	        this->nav_high_command_.zero_();
-	        this->nav_cmd_x_.store(0.0);
-	        this->nav_cmd_y_.store(0.0);
-	        this->nav_cmd_yaw_.store(0.0);
+    if (new_goal)
+    {
+        this->nav_active_goal_seq_.store(goal_seq);
+        this->nav_timer_left_.store(this->nav_episode_length_s_);
+        this->nav_time_io_.store(0.0);
+        this->nav_time_io_hf_.store(0.0);
+        this->nav_high_command_.zero_();
+        this->nav_cmd_x_.store(0.0);
+        this->nav_cmd_y_.store(0.0);
+        this->nav_cmd_yaw_.store(0.0);
 
-	        // Initialize per-episode goal and spawn inputs (body frame).
-	        this->nav_position_targets_body_initial_ = torch::tensor({{
-	            static_cast<float>(goal_body_x_initial),
-	            static_cast<float>(goal_body_y_initial),
-	            static_cast<float>(goal_body_yaw_initial),
-	        }});
-		        this->nav_spawn_positions_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
-		    }
+        this->nav_position_targets_body_initial_ = torch::tensor({{
+            static_cast<float>(goal_body_x_initial),
+            static_cast<float>(goal_body_y_initial),
+            static_cast<float>(goal_body_yaw_initial),
+        }});
+        this->nav_spawn_positions_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
+    }
 
-	    // For evaluation only: latch goal in world (once) if we have world pose and haven't latched yet.
-	    // This does NOT affect model inputs (which use goal_body_initial).
-	    if (!this->nav_goal_world_valid_.load() && this->nav_base_world_valid_.load())
-	    {
-	        const double rx = this->nav_base_world_x_.load();
-	        const double ry = this->nav_base_world_y_.load();
-	        const double ryaw = this->nav_base_world_yaw_.load();
-	        const double c = std::cos(ryaw);
-	        const double s = std::sin(ryaw);
-	        const double gx = rx + c * goal_body_x_initial - s * goal_body_y_initial;
-	        const double gy = ry + s * goal_body_x_initial + c * goal_body_y_initial;
-	        const double gyaw = WrapToPi(ryaw + goal_body_yaw_initial);
-	        this->nav_goal_world_x_.store(gx);
-	        this->nav_goal_world_y_.store(gy);
-	        this->nav_goal_world_yaw_.store(gyaw);
-	        this->nav_goal_world_valid_.store(true);
-	    }
-
-	    // For evaluation only: compute live goal in body frame from latched world goal and current world pose.
-	    bool goal_body_live_ok = false;
-	    double goal_body_live_x = 0.0;
-	    double goal_body_live_y = 0.0;
-	    double goal_body_live_yaw = 0.0;
-	    if (this->nav_goal_world_valid_.load() && this->nav_base_world_valid_.load())
-	    {
-	        const double rx = this->nav_base_world_x_.load();
-	        const double ry = this->nav_base_world_y_.load();
-	        const double ryaw = this->nav_base_world_yaw_.load();
-	        const double gx = this->nav_goal_world_x_.load();
-	        const double gy = this->nav_goal_world_y_.load();
-	        const double gyaw = this->nav_goal_world_yaw_.load();
-
-	        const double dx = gx - rx;
-	        const double dy = gy - ry;
-	        const double c = std::cos(-ryaw);
-	        const double s = std::sin(-ryaw);
-	        goal_body_live_x = dx * c - dy * s;
-	        goal_body_live_y = dx * s + dy * c;
-	        goal_body_live_yaw = WrapToPi(gyaw - ryaw);
-	        goal_body_live_ok = true;
-	    }
-
-		    const double timer_left = this->nav_timer_left_.load();
-		    const double timer_norm = std::max(0.0, timer_left) / std::max(1e-6, this->nav_episode_length_s_);
-			    const double time_io = this->nav_time_io_.load();
+    const double timer_left = this->nav_timer_left_.load();
+    const double timer_norm = std::max(0.0, timer_left) / std::max(1e-6, this->nav_episode_length_s_);
+    const double time_io = this->nav_time_io_.load();
 
     torch::Tensor timer_tensor = torch::tensor({{static_cast<float>(timer_norm)}});
     torch::Tensor time_io_tensor = torch::tensor({{static_cast<float>(time_io)}});
@@ -803,16 +770,24 @@ void RL_Real::UpdateHighFrequencyObs()
         this->nav_obs_io_hist_buf_.reset_from_0({0}, obs_io_frame);
         this->nav_highfreq_buf_.reset({0}, obs_io_frame_hf);
     }
-    else{
+    else
+    {
         this->nav_obs_hist_buf_.insert(obs_frame);
-        this->nav_obs_io_hist_buf_.insert(obs_io_frame);}
-    
+        this->nav_obs_io_hist_buf_.insert(obs_io_frame);
+    }
+
     std::vector<int> obs_ids_10;
     obs_ids_10.reserve(this->nav_obs_hist_len_);
-    for (int i = this->nav_obs_hist_len_ - 1; i >= 0; --i) obs_ids_10.push_back(i);
+    for (int i = this->nav_obs_hist_len_ - 1; i >= 0; --i)
+    {
+        obs_ids_10.push_back(i);
+    }
     std::vector<int> obs_ids_20;
     obs_ids_20.reserve(this->nav_highfreq_hist_len_);
-    for (int i = this->nav_highfreq_hist_len_ - 1; i >= 0; --i) obs_ids_20.push_back(i);
+    for (int i = this->nav_highfreq_hist_len_ - 1; i >= 0; --i)
+    {
+        obs_ids_20.push_back(i);
+    }
 
     torch::Tensor obs_hist = this->nav_obs_hist_buf_.get_obs_vec(obs_ids_10);
     torch::Tensor obs_io_hist = this->nav_obs_io_hist_buf_.get_obs_vec(obs_ids_10);
@@ -833,60 +808,20 @@ void RL_Real::UpdateHighFrequencyObs()
         vision_feat = torch::zeros({1, 0}, torch::dtype(torch::kFloat32));
     }
 
-	    torch::Tensor cmd;
-	    torch::Tensor pred_target_body;
-	    
-	    torch::jit::IValue out;
-	    try
-	    {
-	        static int nav_input_print_count = 0;
-	        if (nav_input_print_count < 5)
-	        {
-	            auto print_sizes = [](const c10::IntArrayRef &sizes)
-	            {
-	                std::cout << "[";
-	                for (size_t i = 0; i < sizes.size(); ++i)
-	                {
-	                    std::cout << sizes[i] << (i + 1 < sizes.size() ? ", " : "");
-	                }
-	                std::cout << "]";
-	            };
+    torch::Tensor cmd;
+    torch::Tensor pred_target_body;
+    torch::jit::IValue out;
+    try
+    {
+        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_hist, obs_io_hist, vision_feat, hf_hist};
+        out = this->nav_high_model_.forward(inputs);
+    }
+    catch (const c10::Error &e)
+    {
+        std::cout << LOGGER::WARNING << "Nav high forward failed: " << e.what() << std::endl;
+        return;
+    }
 
-		            std::cout << "[nav] hf_hist sizes=";
-		            print_sizes(hf_hist.sizes());
-		            std::cout << std::endl;
-
-		            // hf_hist is concatenated over nav_highfreq_hist_len_ frames.
-		            // Print only the first 7 dims of each frame:
-		            //   [time_io, ang_vel(3), projected_gravity(3)]
-		            const int hf_len = this->nav_highfreq_hist_len_;
-		            const int hf_dim = static_cast<int>(obs_io_frame_hf.size(1));
-		            torch::Tensor hf_mat = hf_hist.reshape({hf_len, hf_dim}).to(torch::kCPU);
-		            std::cout << "[nav] hf_hist first7 per frame (oldest->newest):" << std::endl;
-		            for (int t = 0; t < hf_len; ++t)
-		            {
-		                std::cout << "  [" << t << "] ";
-		                for (int j = 0; j < 7; ++j)
-		                {
-		                    std::cout << hf_mat[t][j].item<float>() << (j + 1 < 7 ? " " : "");
-		                }
-		                std::cout << std::endl;
-		            }
-
-		            ++nav_input_print_count;
-		        }
-
-	        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_hist, obs_io_hist, vision_feat, hf_hist};
-	        out = this->nav_high_model_.forward(inputs);
-	    }
-	    catch (const c10::Error &e)
-	    {
-	        std::cout << LOGGER::WARNING << "Nav high forward failed: " << e.what() << std::endl;
-	        return;
-	    }
-
-    // Unpack output: some models return a Tensor, some return a tuple/list:
-    //   (actions, v, target_pos, spawn_pos)
     try
     {
         if (out.isTensor())
@@ -929,72 +864,39 @@ void RL_Real::UpdateHighFrequencyObs()
     }
 
     const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
-
-    // clip + momentum smoothing
     cmd = torch::clamp(cmd_raw, -static_cast<float>(this->nav_clip_commands_), static_cast<float>(this->nav_clip_commands_));
 
-    
-        static int dbg_tick = 0;
-	    dbg_tick = (dbg_tick + 1) % 10; 
-	    if (dbg_tick == 0 || new_goal)
-	    {
-	        const double rx = cmd_raw[0][0].item<double>();
-        const double ry = cmd_raw[0][1].item<double>();
-        const double rz = cmd_raw[0][2].item<double>();
-	        const double cx = cmd[0][0].item<double>();
-	        const double cy = cmd[0][1].item<double>();
-	        const double cz = cmd[0][2].item<double>();
-			        std::cout << LOGGER::INFO
-			                  << "NavHigh raw:[" << rx << ", " << ry << ", " << rz << "]"
-			                  << " clipped:[" << cx << ", " << cy << ", " << cz << "]"
-			                  << " goal_body_initial:[" << this->nav_position_targets_body_initial_[0][0].item<double>()
-			                  << ", " << this->nav_position_targets_body_initial_[0][1].item<double>()
-			                  << ", " << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
-			                  << std::endl;
-
-			        if (!goal_body_live_ok)
-			        {
-			            static std::atomic<bool> warned{false};
-			            if (!warned.exchange(true))
-			            {
-			                std::cout << LOGGER::WARNING
-	                          << "No world pose received; goal_body_live (evaluation) is unavailable."
-	                          << std::endl;
-	            }
-	        }
-	    }
-
-	    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
-	    {
-	        const double tx = pred_target_body[0][0].item<double>();
-	        const double ty = pred_target_body[0][1].item<double>();
-	        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
-
-	        if (dbg_tick == 0 || new_goal)
-	        {
-	            std::cout << LOGGER::INFO
-	                      << " NavPred body(robot_model):[" << tx << ", " << ty << ", " << tyaw << "]";
-	            if (goal_body_live_ok)
-	            {
-	                std::cout << " goal_body_live:[" << goal_body_live_x << ", " << goal_body_live_y << ", " << goal_body_live_yaw << "]";
-	            }
-	            else
-	            {
-	                std::cout << " goal_body_live:[NA]";
-	            }
-	            std::cout << std::endl;
-	        }
-
-        this->UpdateNavPredMarker(tx, ty, tyaw);
+    static int dbg_tick = 0;
+    dbg_tick = (dbg_tick + 1) % 10;
+    if (dbg_tick == 0 || new_goal)
+    {
+        std::cout << LOGGER::INFO
+                  << "NavHigh raw:[" << cmd_raw[0][0].item<double>() << ", " << cmd_raw[0][1].item<double>() << ", " << cmd_raw[0][2].item<double>() << "]"
+                  << " clipped:[" << cmd[0][0].item<double>() << ", " << cmd[0][1].item<double>() << ", " << cmd[0][2].item<double>() << "]"
+                  << " goal_body_initial:[" << this->nav_position_targets_body_initial_[0][0].item<double>() << ", "
+                  << this->nav_position_targets_body_initial_[0][1].item<double>() << ", "
+                  << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
+                  << std::endl;
     }
 
-	    this->nav_cmd_x_.store(cmd[0][0].item<double>());
-	    this->nav_cmd_y_.store(cmd[0][1].item<double>());
-	    this->nav_cmd_yaw_.store(cmd[0][2].item<double>());
-	    this->nav_high_command_ = cmd.to(torch::kFloat32);
+    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
+    {
+        const double tx = pred_target_body[0][0].item<double>();
+        const double ty = pred_target_body[0][1].item<double>();
+        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
+        if (dbg_tick == 0 || new_goal)
+        {
+            std::cout << LOGGER::INFO << "NavPred body:[" << tx << ", " << ty << ", " << tyaw << "]" << std::endl;
+        }
+    }
 
-		    this->nav_timer_left_.store(timer_left - this->nav_dt_);
-		    this->nav_time_io_.store(time_io + this->nav_dt_);
+    this->nav_cmd_x_.store(cmd[0][0].item<double>());
+    this->nav_cmd_y_.store(cmd[0][1].item<double>());
+    this->nav_cmd_yaw_.store(cmd[0][2].item<double>());
+    this->nav_high_command_ = cmd.to(torch::kFloat32);
+
+    this->nav_timer_left_.store(std::max(0.0, timer_left - this->nav_dt_));
+    this->nav_time_io_.store(time_io + this->nav_dt_);
 }
 
 

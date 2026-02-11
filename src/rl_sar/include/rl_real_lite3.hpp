@@ -25,6 +25,7 @@
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 
 //Retroid Gamepad
 #include "gamepad.h"
@@ -39,7 +40,6 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/pose2_d.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #endif
 
 #include "matplotlibcpp.h"
@@ -83,6 +83,7 @@ private:
     RobotData* robot_data_=nullptr;
     void UDPRecv();
     void EulerToQuaternion(float roll, float pitch, float yaw, float q[4]);
+    void HandleKeyboard();
 
     //Retroid Gamepad
     std::shared_ptr<RetroidGamepad> gamepad_ptr_;
@@ -93,6 +94,8 @@ private:
     void RunHighLevel();
     bool InitHierarchicalNav();
     void UpdateHighFrequencyObs();
+    void StartNavGoalInput();
+    void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};
@@ -103,26 +106,12 @@ private:
     std::atomic<double> nav_goal_body_x_{0.0};
     std::atomic<double> nav_goal_body_y_{0.0};
     std::atomic<double> nav_goal_body_yaw_{0.0};
-    // Goal in world (latched from body goal + robot pose at goal time); used for evaluation/visualization.
-    std::atomic<double> nav_goal_world_x_{0.0};
-    std::atomic<double> nav_goal_world_y_{0.0};
-    std::atomic<double> nav_goal_world_yaw_{0.0};
-    std::atomic<bool> nav_goal_world_valid_{false};
 
     std::atomic<double> nav_cmd_x_{0.0};
     std::atomic<double> nav_cmd_y_{0.0};
     std::atomic<double> nav_cmd_yaw_{0.0};
-
-    // robot world pose (optional, for evaluation only)
-    std::atomic<double> nav_base_world_x_{0.0};
-    std::atomic<double> nav_base_world_y_{0.0};
-    std::atomic<double> nav_base_world_z_{0.0};
-    std::atomic<double> nav_base_world_yaw_{0.0};
-    std::atomic<double> nav_base_world_qx_{0.0};
-    std::atomic<double> nav_base_world_qy_{0.0};
-    std::atomic<double> nav_base_world_qz_{0.0};
-    std::atomic<double> nav_base_world_qw_{1.0};
-    std::atomic<bool> nav_base_world_valid_{false};
+    std::atomic<bool> nav_goal_input_active_{false};
+    std::atomic<bool> nav_enable_request_{false};
 
     // buffers and models (guarded as needed)
     torch::jit::script::Module nav_high_model_;
@@ -158,10 +147,6 @@ private:
     std::mutex nav_last_actions_mutex_;
     std::vector<float> nav_last_actions_;
 
-    // Visualization hooks (no-op on real robot)
-    void UpdateNavGoalMarker(double goal_body_x, double goal_body_y, double goal_body_yaw);
-    void UpdateNavPredMarker(double pred_body_x, double pred_body_y, double pred_body_yaw);
-
     // others
     int motiontime = 0;
     std::vector<double> mapped_joint_positions;
@@ -175,9 +160,7 @@ private:
     void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 
     // nav interface
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr nav_odom_subscriber;
     rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr nav_goal_body_subscriber;
-    void NavOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
     void NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg);
 #endif
 
