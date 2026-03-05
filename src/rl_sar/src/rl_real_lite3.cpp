@@ -168,14 +168,40 @@ void RL_Real::GetState(RobotState<double> *state)
     if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
     if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
     if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.R1 != this->rt_keys_record_.R1)) this->control.SetGamepad(Input::Gamepad::LB_RB);
+    if (this->rt_keys_.L1 && this->rt_keys_.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
 
     if (!this->nav_enabled_.load())
     {
-        this->control.x = this->rt_keys_.left_axis_y;
-        this->control.y = -this->rt_keys_.left_axis_x;
-        this->control.yaw = -this->rt_keys_.right_axis_x;
+        // Allow keyboard and joystick to coexist:
+        // only override command with joystick when the stick leaves deadzone.
+        constexpr double kStickDeadzone = 0.08;
+        const double joy_x = static_cast<double>(this->rt_keys_.left_axis_y);
+        const double joy_y = -static_cast<double>(this->rt_keys_.left_axis_x);
+        const double joy_yaw = -static_cast<double>(this->rt_keys_.right_axis_x);
+        const bool joy_active = (std::fabs(joy_x) > kStickDeadzone) ||
+                                (std::fabs(joy_y) > kStickDeadzone) ||
+                                (std::fabs(joy_yaw) > kStickDeadzone);
+        if (joy_active)
+        {
+            this->control.x = joy_x;
+            this->control.y = joy_y;
+            this->control.yaw = joy_yaw;
+            this->joystick_override_active_ = true;
+        }
+        else if (this->joystick_override_active_)
+        {
+            // Stick returned to neutral after taking control: clear once to avoid stale velocity.
+            this->control.x = 0.0;
+            this->control.y = 0.0;
+            this->control.yaw = 0.0;
+            this->joystick_override_active_ = false;
+        }
     }
+    else
+    {
+        this->joystick_override_active_ = false;
+    }
+    this->rt_keys_record_ = this->rt_keys_;
        
     float q[4];
     EulerToQuaternion(this->robot_data_->imu.angle_roll, this->robot_data_->imu.angle_pitch, this->robot_data_->imu.angle_yaw, q);

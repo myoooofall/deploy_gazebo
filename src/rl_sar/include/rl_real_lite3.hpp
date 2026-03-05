@@ -89,6 +89,7 @@ private:
     std::shared_ptr<RetroidGamepad> gamepad_ptr_;
     RetroidKeys rt_keys_record_, rt_keys_;
     bool first_flag_;
+    bool joystick_override_active_ = false;
 
     // hierarchical navigation (high-level policy @ 10Hz)
     void RunHighLevel();
