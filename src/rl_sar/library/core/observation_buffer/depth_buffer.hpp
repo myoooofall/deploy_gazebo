@@ -15,7 +15,7 @@ public:
 
     void reset(std::vector<int> reset_idxs, torch::Tensor new_depth);
     void insert(torch::Tensor new_depth);
-    torch::Tensor get_depth_vec();  // 返回前两帧用于推理（索引0和1，有一帧延迟）
+    torch::Tensor get_depth_vec();  // 返回前 include_history_steps-1 帧用于推理（保留一帧延迟）
     torch::Tensor process_depth_image(const sensor_msgs::msg::Image::SharedPtr msg,
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_publisher);
 

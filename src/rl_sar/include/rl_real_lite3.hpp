@@ -97,6 +97,7 @@ private:
     void UpdateHighFrequencyObs();
     void StartNavGoalInput();
     void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
+    void DisableNavigationWithError(const std::string &stage, const std::string &detail);
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};
@@ -124,6 +125,7 @@ private:
     int nav_obs_hist_len_ = 10;
     int nav_obs_io_hist_len_ = 10;
     int nav_highfreq_hist_len_ = 20;
+    int nav_vision_channels_ = 1;       // number of depth frames consumed by vision model
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
     double nav_clip_commands_ = 3.0;    // default clip

@@ -1,5 +1,6 @@
 #include "depth_buffer.hpp"
 #include <opencv2/highgui.hpp>
+#include <algorithm>
 // DepthBuffer implementation
 DepthBuffer::DepthBuffer() {}
 
@@ -29,34 +30,37 @@ void DepthBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_depth)
 
 void DepthBuffer::insert(torch::Tensor new_depth)
 {
+    if (include_history_steps <= 0)
+    {
+        return;
+    }
 
-    
-    if (!initialized) {
-        // 第一次插入：用第一帧复制满整个buffer (3帧)
-        for (int i = 0; i < include_history_steps; ++i) {
+    if (!initialized)
+    {
+        // First insert: fill the whole history with the first valid frame.
+        for (int i = 0; i < include_history_steps; ++i)
+        {
             depth_buf.index({0, i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
         }
         initialized = true;
-    } else {
-        // 后续插入：FIFO队列逻辑
-        // 将索引0和1的内容前移到索引0和1（索引0的内容被丢弃）
-        // 将索引1的内容移到索引0
-        depth_buf.index({0, 0, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = 
-            depth_buf.index({0, 1, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
-        // 将索引2的内容移到索引1
-        depth_buf.index({0, 1, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = 
-            depth_buf.index({0, 2, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
-        // 新帧插入到索引2（队尾）
-        depth_buf.index({0, 2, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+    }
+    else
+    {
+        // Generic FIFO update for any include_history_steps >= 1.
+        for (int i = 0; i < include_history_steps - 1; ++i)
+        {
+            depth_buf.index({0, i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) =
+                depth_buf.index({0, i + 1, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+        }
+        depth_buf.index({0, include_history_steps - 1, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
     }
 }
 
 torch::Tensor DepthBuffer::get_depth_vec()
 {
-    // 只返回前两帧（索引0和1），索引2（最新帧）不使用，实现一帧延迟
-    // depth_buf shape: [1, 3, 60, 86]
-    // 返回 shape: [1, 2, 60, 86]
-    return depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 2), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+    // Keep one-frame delay: model consumes history_steps - 1 frames.
+    const int hist = std::max(1, include_history_steps - 1);
+    return depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, hist), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
 }
 
 torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::SharedPtr msg,

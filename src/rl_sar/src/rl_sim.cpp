@@ -305,7 +305,7 @@ RL_Sim::RL_Sim()
 
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-        depth_buffer = DepthBuffer(1, 60, 86, 3);  // 1个环境，3帧历史，最终尺寸60x86 (height=60, width=86)
+    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);  // history = vision_channels + 1 (one-frame delay)
 
     // hierarchical navigation: body-frame goal only (no odom dependency)
     this->nav_goal_body_subscriber = this->create_subscription<geometry_msgs::msg::Pose2D>(
@@ -1106,9 +1106,15 @@ bool RL_Sim::InitHierarchicalNav()
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
     if (config["clip_commands"]) this->nav_clip_commands_ = config["clip_commands"].as<double>();
+    if (config["vision_channels"]) this->nav_vision_channels_ = std::max(1, config["vision_channels"].as<int>());
     this->nav_timer_left_.store(this->nav_episode_length_s_);
     this->nav_time_io_.store(0.0);
     this->nav_time_io_hf_.store(0.0);
+    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    std::cout << LOGGER::INFO
+              << "Nav vision_channels=" << this->nav_vision_channels_
+              << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
+              << std::endl;
 
     this->nav_high_model_path_ = nav_dir + "/" + high_name;
     this->nav_vision_model_path_ = nav_dir + "/" + vision_name;

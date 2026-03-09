@@ -83,7 +83,7 @@ RL_Real::RL_Real()
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-        depth_buffer = DepthBuffer(1, 60, 86, 2);  // 1个环境，2帧历史 -> 推理用1帧（丢弃最新帧形成一帧延迟）
+    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);  // history = vision_channels + 1 (one-frame delay)
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
@@ -266,6 +266,21 @@ void RL_Real::SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, cons
     std::cout << LOGGER::INFO
               << "NavGoalBody(" << (source ? source : "unknown") << "): x=" << goal_x
               << " y=" << goal_y << " yaw=" << yaw_wrapped << std::endl;
+}
+
+void RL_Real::DisableNavigationWithError(const std::string &stage, const std::string &detail)
+{
+    this->nav_enabled_.store(false);
+    this->nav_enable_request_.store(false);
+    this->control.navigation_mode = false;
+    this->nav_cmd_x_.store(0.0);
+    this->nav_cmd_y_.store(0.0);
+    this->nav_cmd_yaw_.store(0.0);
+    this->nav_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
+
+    std::cout << LOGGER::ERROR
+              << "[NAV] Disabled due to " << stage << " error: " << detail
+              << std::endl;
 }
 
 void RL_Real::StartNavGoalInput()
@@ -577,9 +592,15 @@ bool RL_Real::InitHierarchicalNav()
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
     if (config["clip_commands"]) this->nav_clip_commands_ = config["clip_commands"].as<double>();
+    if (config["vision_channels"]) this->nav_vision_channels_ = std::max(1, config["vision_channels"].as<int>());
     this->nav_timer_left_.store(this->nav_episode_length_s_);
     this->nav_time_io_.store(0.0);
     this->nav_time_io_hf_.store(0.0);
+    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    std::cout << LOGGER::INFO
+              << "Nav vision_channels=" << this->nav_vision_channels_
+              << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
+              << std::endl;
 
     this->nav_high_model_path_ = nav_dir + "/" + high_name;
     this->nav_vision_model_path_ = nav_dir + "/" + vision_name;
@@ -826,11 +847,38 @@ void RL_Real::RunHighLevel()
     try
     {
         torch::Tensor depth = depth_buffer.get_depth_vec().to(torch::kFloat32);
-        vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+        if (!depth.defined() || depth.numel() == 0)
+        {
+            throw std::runtime_error("depth history is empty");
+        }
+        if (depth.dim() != 4)
+        {
+            throw std::runtime_error("depth history rank is not 4");
+        }
+        const int depth_channels = static_cast<int>(depth.size(1));
+        if (depth_channels != this->nav_vision_channels_)
+        {
+            throw std::runtime_error("depth history channels mismatch config vision_channels");
+        }
+        vision_feat = this->nav_vision_model_.forward({depth}).toTensor().to(torch::kFloat32);
+        if (vision_feat.dim() == 1)
+        {
+            vision_feat = vision_feat.unsqueeze(0);
+        }
+        if (!vision_feat.defined() || vision_feat.numel() == 0)
+        {
+            throw std::runtime_error("vision model output is empty");
+        }
+    }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError("vision_forward", e.what());
+        return;
     }
     catch (...)
     {
-        vision_feat = torch::zeros({1, 0}, torch::dtype(torch::kFloat32));
+        this->DisableNavigationWithError("vision_forward", "unknown exception");
+        return;
     }
 
     torch::Tensor cmd;
@@ -841,9 +889,14 @@ void RL_Real::RunHighLevel()
         std::vector<torch::jit::IValue> inputs = {obs_frame, obs_hist, obs_io_hist, vision_feat, hf_hist};
         out = this->nav_high_model_.forward(inputs);
     }
-    catch (const c10::Error &e)
+    catch (const std::exception &e)
     {
-        std::cout << LOGGER::WARNING << "Nav high forward failed: " << e.what() << std::endl;
+        this->DisableNavigationWithError("high_forward", e.what());
+        return;
+    }
+    catch (...)
+    {
+        this->DisableNavigationWithError("high_forward", "unknown exception");
         return;
     }
 

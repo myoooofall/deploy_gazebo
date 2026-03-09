@@ -8,6 +8,7 @@ lite3/navi:
   nav_dt: 0.1
   nav_episode_length_s: 30.0
   clip_commands: 5.0
+  vision_channels: 1
   momentum_factor: 0.95
   num_observations: 45
   observations: ["commands", "ang_vel", "gravity_vec", "dof_pos", "dof_vel", "actions"]
