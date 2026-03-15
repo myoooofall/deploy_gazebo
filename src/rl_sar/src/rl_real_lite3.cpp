@@ -5,6 +5,8 @@
 
 #include "rl_real_lite3.hpp"
 
+#include <chrono>
+#include <iomanip>
 #include <sstream>
 
 static double WrapToPi(double a)
@@ -409,6 +411,39 @@ void RL_Real::RunModel()
 {
     if (this->rl_init_done)
     {
+        using SteadyClock = std::chrono::steady_clock;
+        static bool perf_inited = false;
+        static bool perf_has_last_tick = false;
+        static SteadyClock::time_point perf_last_tick_tp;
+        static SteadyClock::time_point perf_last_report_tp;
+        static double perf_sum_infer_ms = 0.0;
+        static double perf_sum_total_ms = 0.0;
+        static double perf_sum_tick_ms = 0.0;
+        static double perf_max_infer_ms = 0.0;
+        static double perf_max_total_ms = 0.0;
+        static double perf_max_tick_ms = 0.0;
+        static uint64_t perf_samples = 0;
+        static uint64_t perf_tick_samples = 0;
+        static uint64_t perf_over_budget = 0;
+
+        const auto cycle_begin_tp = SteadyClock::now();
+        const double loop_budget_ms = this->params.dt * this->params.decimation * 1000.0;
+        if (!perf_inited)
+        {
+            perf_last_report_tp = cycle_begin_tp;
+            perf_inited = true;
+        }
+
+        if (perf_has_last_tick)
+        {
+            const double tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
+            perf_sum_tick_ms += tick_ms;
+            perf_max_tick_ms = std::max(perf_max_tick_ms, tick_ms);
+            perf_tick_samples += 1;
+        }
+        perf_last_tick_tp = cycle_begin_tp;
+        perf_has_last_tick = true;
+
         this->episode_length_buf += 1;
         this->obs.ang_vel = torch::tensor(this->robot_state.imu.gyroscope).unsqueeze(0);
         // Always feed the low-level policy with the active control command.
@@ -418,7 +453,9 @@ void RL_Real::RunModel()
         this->obs.dof_pos = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
         this->obs.dof_vel = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
 
+        const auto infer_begin_tp = SteadyClock::now();
         this->obs.actions = this->Forward();
+        const auto infer_end_tp = SteadyClock::now();
         {
             std::lock_guard<std::mutex> lock(this->nav_last_actions_mutex_);
             this->nav_last_actions_.resize(this->params.num_of_dofs);
@@ -449,6 +486,53 @@ void RL_Real::RunModel()
         torch::Tensor tau_est = torch::tensor(this->robot_state.motor_state.tau_est).unsqueeze(0);
         this->CSVLogger(this->output_dof_tau, tau_est, this->obs.dof_pos, this->output_dof_pos, this->obs.dof_vel);
 #endif
+
+        const auto cycle_end_tp = SteadyClock::now();
+        const double infer_ms = std::chrono::duration<double, std::milli>(infer_end_tp - infer_begin_tp).count();
+        const double total_ms = std::chrono::duration<double, std::milli>(cycle_end_tp - cycle_begin_tp).count();
+        perf_sum_infer_ms += infer_ms;
+        perf_sum_total_ms += total_ms;
+        perf_max_infer_ms = std::max(perf_max_infer_ms, infer_ms);
+        perf_max_total_ms = std::max(perf_max_total_ms, total_ms);
+        perf_samples += 1;
+        if (infer_ms > loop_budget_ms)
+        {
+            perf_over_budget += 1;
+        }
+
+        if (std::chrono::duration<double>(cycle_end_tp - perf_last_report_tp).count() >= 1.0 && perf_samples > 0)
+        {
+            const double avg_infer_ms = perf_sum_infer_ms / static_cast<double>(perf_samples);
+            const double avg_total_ms = perf_sum_total_ms / static_cast<double>(perf_samples);
+            const double avg_tick_ms = (perf_tick_samples > 0) ? (perf_sum_tick_ms / static_cast<double>(perf_tick_samples)) : 0.0;
+            const double loop_hz = (avg_tick_ms > 1e-6) ? (1000.0 / avg_tick_ms) : 0.0;
+            const double budget_usage_pct = (loop_budget_ms > 1e-6) ? (avg_infer_ms / loop_budget_ms * 100.0) : 0.0;
+
+            std::ostringstream perf_ss;
+            perf_ss << std::fixed << std::setprecision(2)
+                    << "[PERF][LL] infer(ms) avg/max=" << avg_infer_ms << "/" << perf_max_infer_ms
+                    << " total(ms) avg/max=" << avg_total_ms << "/" << perf_max_total_ms;
+            if (perf_tick_samples > 0)
+            {
+                perf_ss << " loop(ms) avg/max=" << avg_tick_ms << "/" << perf_max_tick_ms
+                        << " (" << loop_hz << " Hz)";
+            }
+            perf_ss << " budget=" << loop_budget_ms << "ms"
+                    << " usage=" << budget_usage_pct << "%"
+                    << " over_budget=" << perf_over_budget << "/" << perf_samples;
+            std::cout << LOGGER::INFO << perf_ss.str() << std::endl;
+
+            perf_sum_infer_ms = 0.0;
+            perf_sum_total_ms = 0.0;
+            perf_sum_tick_ms = 0.0;
+            perf_max_infer_ms = 0.0;
+            perf_max_total_ms = 0.0;
+            perf_max_tick_ms = 0.0;
+            perf_samples = 0;
+            perf_tick_samples = 0;
+            perf_over_budget = 0;
+            perf_last_report_tp = cycle_end_tp;
+        }
     }
 }
 
