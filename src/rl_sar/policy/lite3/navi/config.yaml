@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 lite3/navi:
-  model_name: "himloco.pt"
+  model_name: "policy.pt"
   high_model_name: "lite3_navi_high.pt"
   vision_model_name: "lite3_navi_vision.pt"
   nav_dt: 0.1

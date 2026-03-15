@@ -13,7 +13,7 @@
 #include "rl_sdk.hpp"
 #include "observation_buffer.hpp"
 #include "loop.hpp"
-#include "fsm.hpp"
+#include "lite3/fsm.hpp"
 
 // Lite3 SDK
 #include "sender.h"
