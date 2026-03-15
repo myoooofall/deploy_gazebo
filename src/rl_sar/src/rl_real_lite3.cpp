@@ -425,6 +425,9 @@ void RL_Real::RunModel()
         static uint64_t perf_samples = 0;
         static uint64_t perf_tick_samples = 0;
         static uint64_t perf_over_budget = 0;
+        static double perf_max_abs_roll_deg = 0.0;
+        static double perf_max_abs_pitch_deg = 0.0;
+        static double perf_max_cmd_norm = 0.0;
 
         const auto cycle_begin_tp = SteadyClock::now();
         const double loop_budget_ms = this->params.dt * this->params.decimation * 1000.0;
@@ -452,6 +455,30 @@ void RL_Real::RunModel()
         this->obs.base_quat = torch::tensor(this->robot_state.imu.quaternion).unsqueeze(0);
         this->obs.dof_pos = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
         this->obs.dof_vel = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, this->params.num_of_dofs).unsqueeze(0);
+
+        {
+            const double w = this->robot_state.imu.quaternion[0];
+            const double x = this->robot_state.imu.quaternion[1];
+            const double y = this->robot_state.imu.quaternion[2];
+            const double z = this->robot_state.imu.quaternion[3];
+
+            const double sinr_cosp = 2.0 * (w * x + y * z);
+            const double cosr_cosp = 1.0 - 2.0 * (x * x + y * y);
+            const double roll_rad = std::atan2(sinr_cosp, cosr_cosp);
+
+            const double sinp = 2.0 * (w * y - z * x);
+            const double pitch_rad = std::asin(std::max(-1.0, std::min(1.0, sinp)));
+
+            const double rad2deg = 57.29577951308232;
+            perf_max_abs_roll_deg = std::max(perf_max_abs_roll_deg, std::abs(roll_rad) * rad2deg);
+            perf_max_abs_pitch_deg = std::max(perf_max_abs_pitch_deg, std::abs(pitch_rad) * rad2deg);
+        }
+        {
+            const double cmd_norm = std::sqrt(this->control.x * this->control.x +
+                                              this->control.y * this->control.y +
+                                              this->control.yaw * this->control.yaw);
+            perf_max_cmd_norm = std::max(perf_max_cmd_norm, cmd_norm);
+        }
 
         const auto infer_begin_tp = SteadyClock::now();
         this->obs.actions = this->Forward();
@@ -519,6 +546,8 @@ void RL_Real::RunModel()
             }
             perf_ss << " budget=" << loop_budget_ms << "ms"
                     << " usage=" << budget_usage_pct << "%"
+                    << " roll/pitch_max(deg)=" << perf_max_abs_roll_deg << "/" << perf_max_abs_pitch_deg
+                    << " cmd_norm_max=" << perf_max_cmd_norm
                     << " over_budget=" << perf_over_budget << "/" << perf_samples;
             std::cout << LOGGER::INFO << perf_ss.str() << std::endl;
 
@@ -531,6 +560,9 @@ void RL_Real::RunModel()
             perf_samples = 0;
             perf_tick_samples = 0;
             perf_over_budget = 0;
+            perf_max_abs_roll_deg = 0.0;
+            perf_max_abs_pitch_deg = 0.0;
+            perf_max_cmd_norm = 0.0;
             perf_last_report_tp = cycle_end_tp;
         }
     }
