@@ -107,13 +107,17 @@ public:
 
     std::string CheckChange() override
     {
-        if (rl.control.current_keyboard == Input::Keyboard::P || rl.control.current_gamepad == Input::Gamepad::LB_X)
+        if (rl.control.current_keyboard == Input::Keyboard::P ||
+            rl.control.current_gamepad == Input::Gamepad::LB ||
+            rl.control.current_gamepad == Input::Gamepad::LB_X)
         {
             return "RLFSMStatePassive";
         }
         if (rl.running_percent == 1.0f)
         {
-            if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
+            if (rl.control.current_keyboard == Input::Keyboard::Num1 ||
+                rl.control.current_gamepad == Input::Gamepad::RB_DPadUp ||
+                rl.control.current_gamepad == Input::Gamepad::Y)
             {
                 return "RLFSMStateRL_Locomotion";
             }
@@ -160,7 +164,10 @@ public:
 
     std::string CheckChange() override
     {
-        if (rl.control.current_keyboard == Input::Keyboard::P || rl.control.current_gamepad == Input::Gamepad::LB_X || rl.running_percent == 1.0f)
+        if (rl.control.current_keyboard == Input::Keyboard::P ||
+            rl.control.current_gamepad == Input::Gamepad::LB ||
+            rl.control.current_gamepad == Input::Gamepad::LB_X ||
+            rl.running_percent == 1.0f)
         {
             return "RLFSMStatePassive";
         }
@@ -230,7 +237,9 @@ public:
 
     std::string CheckChange() override
     {
-        if (rl.control.current_keyboard == Input::Keyboard::P || rl.control.current_gamepad == Input::Gamepad::LB_X)
+        if (rl.control.current_keyboard == Input::Keyboard::P ||
+            rl.control.current_gamepad == Input::Gamepad::LB ||
+            rl.control.current_gamepad == Input::Gamepad::LB_X)
         {
             return "RLFSMStatePassive";
         }
@@ -242,7 +251,9 @@ public:
         {
             return "RLFSMStateGetUp";
         }
-        else if (rl.control.current_keyboard == Input::Keyboard::Num1 || rl.control.current_gamepad == Input::Gamepad::RB_DPadUp)
+        else if (rl.control.current_keyboard == Input::Keyboard::Num1 ||
+                 rl.control.current_gamepad == Input::Gamepad::RB_DPadUp ||
+                 rl.control.current_gamepad == Input::Gamepad::Y)
         {
             return "RLFSMStateRL_Locomotion";
         }

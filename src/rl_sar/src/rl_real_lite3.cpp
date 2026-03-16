@@ -403,6 +403,13 @@ void RL_Real::RobotControl()
         this->GetState(&this->robot_state);
         this->UpdateHighFrequencyObs();
     }
+
+    // Command magnitude safety clamp for low-level policy inputs.
+    // Applied after GetState so both keyboard and gamepad commands are constrained.
+    this->control.x = std::max(-1.0, std::min(1.0, this->control.x));
+    this->control.y = std::max(-1.0, std::min(1.0, this->control.y));
+    this->control.yaw = std::max(-1.5, std::min(1.5, this->control.yaw));
+
     this->StateController(&this->robot_state, &this->robot_command);
     this->SetCommand(&this->robot_command);
 }
