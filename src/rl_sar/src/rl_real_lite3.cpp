@@ -558,6 +558,47 @@ void RL_Real::RunModel()
                     << " over_budget=" << perf_over_budget << "/" << perf_samples;
             std::cout << LOGGER::INFO << perf_ss.str() << std::endl;
 
+            // Joint diagnostics (1 Hz): print actual joint positions and HipX margin to limits.
+            {
+                constexpr int kDofsToPrint = 12;
+                constexpr double kHipXLimit = 0.523;      // rad
+                constexpr double kHipXWarnMargin = 0.05;  // rad (~2.9 deg)
+                const int hipx_idx[4] = {0, 3, 6, 9};
+
+                std::ostringstream q_ss;
+                q_ss << std::fixed << std::setprecision(3)
+                     << "[PERF][JOINT] q(rad)=";
+                q_ss << "[";
+                for (int i = 0; i < kDofsToPrint; ++i)
+                {
+                    if (i > 0) q_ss << ", ";
+                    q_ss << this->robot_state.motor_state.q[i];
+                }
+                q_ss << "]";
+                std::cout << LOGGER::INFO << q_ss.str() << std::endl;
+
+                std::ostringstream hipx_ss;
+                hipx_ss << std::fixed << std::setprecision(3)
+                        << "[PERF][HIPX] margin_to_limit(rad)=";
+                hipx_ss << "[";
+                bool near_limit = false;
+                for (int j = 0; j < 4; ++j)
+                {
+                    const int idx = hipx_idx[j];
+                    const double q = this->robot_state.motor_state.q[idx];
+                    const double margin = kHipXLimit - std::fabs(q);
+                    if (j > 0) hipx_ss << ", ";
+                    hipx_ss << margin;
+                    if (margin < kHipXWarnMargin) near_limit = true;
+                }
+                hipx_ss << "]";
+                if (near_limit)
+                {
+                    hipx_ss << " [NEAR_LIMIT]";
+                }
+                std::cout << LOGGER::INFO << hipx_ss.str() << std::endl;
+            }
+
             perf_sum_infer_ms = 0.0;
             perf_sum_total_ms = 0.0;
             perf_sum_tick_ms = 0.0;
