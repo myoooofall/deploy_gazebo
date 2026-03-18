@@ -109,6 +109,7 @@ public:
     {
         if (rl.control.current_keyboard == Input::Keyboard::P ||
             rl.control.current_gamepad == Input::Gamepad::LB ||
+            rl.control.current_gamepad == Input::Gamepad::L2 ||
             rl.control.current_gamepad == Input::Gamepad::LB_X)
         {
             return "RLFSMStatePassive";
@@ -166,6 +167,7 @@ public:
     {
         if (rl.control.current_keyboard == Input::Keyboard::P ||
             rl.control.current_gamepad == Input::Gamepad::LB ||
+            rl.control.current_gamepad == Input::Gamepad::L2 ||
             rl.control.current_gamepad == Input::Gamepad::LB_X ||
             rl.running_percent == 1.0f)
         {
@@ -239,6 +241,7 @@ public:
     {
         if (rl.control.current_keyboard == Input::Keyboard::P ||
             rl.control.current_gamepad == Input::Gamepad::LB ||
+            rl.control.current_gamepad == Input::Gamepad::L2 ||
             rl.control.current_gamepad == Input::Gamepad::LB_X)
         {
             return "RLFSMStatePassive";

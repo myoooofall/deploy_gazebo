@@ -88,7 +88,7 @@ namespace Input
     enum class Gamepad
     {
         None = 0,
-        A, B, X, Y, LB, RB, LStick, RStick, DPadUp, DPadDown, DPadLeft, DPadRight,
+        A, B, X, Y, LB, RB, L2, LStick, RStick, DPadUp, DPadDown, DPadLeft, DPadRight,
         LB_A, LB_B, LB_X, LB_Y, LB_LStick, LB_RStick, LB_DPadUp, LB_DPadDown, LB_DPadLeft, LB_DPadRight,
         RB_A, RB_B, RB_X, RB_Y, RB_LStick, RB_RStick, RB_DPadUp, RB_DPadDown, RB_DPadLeft, RB_DPadRight,
         LB_RB
