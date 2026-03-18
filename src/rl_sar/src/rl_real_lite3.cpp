@@ -247,6 +247,16 @@ void RL_Real::HandleKeyboard()
 {
     if (this->nav_goal_input_active_.load())
     {
+        static auto last_hint_tp = std::chrono::steady_clock::time_point{};
+        const auto now_tp = std::chrono::steady_clock::now();
+        if (last_hint_tp.time_since_epoch().count() == 0 ||
+            std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_hint_tp).count() >= 1)
+        {
+            std::cout << LOGGER::INFO
+                      << "[NAV][INPUT] waiting... format: x y yaw(rad), then Enter"
+                      << std::endl;
+            last_hint_tp = now_tp;
+        }
         return;
     }
 
@@ -254,6 +264,10 @@ void RL_Real::HandleKeyboard()
 
     if (this->control.current_keyboard == Input::Keyboard::G)
     {
+        std::cout << std::endl
+                  << LOGGER::INFO
+                  << "[NAV][INPUT] G pressed. Enter goal as: x y yaw(rad)"
+                  << std::endl;
         this->StartNavGoalInput();
         this->control.current_keyboard = this->control.last_keyboard;
     }
@@ -299,7 +313,7 @@ void RL_Real::StartNavGoalInput()
 
     std::thread([this]() {
         std::cout << LOGGER::INFO
-                  << "[NAV] Input goal in body frame: x y yaw(rad), then Enter."
+                  << "[NAV][INPUT] Input goal in body frame: x y yaw(rad), then Enter."
                   << std::endl;
 
         std::string line;
@@ -326,7 +340,7 @@ void RL_Real::StartNavGoalInput()
         if (!(iss >> x >> y >> yaw))
         {
             std::cout << LOGGER::WARNING
-                      << "[NAV] Invalid format. Expect: x y yaw(rad)."
+                      << "[NAV][INPUT] Invalid format. Expect: x y yaw(rad)."
                       << std::endl;
             this->nav_goal_input_active_.store(false);
             return;
@@ -540,69 +554,6 @@ void RL_Real::RunModel()
 
         if (std::chrono::duration<double>(cycle_end_tp - perf_last_report_tp).count() >= 1.0 && perf_samples > 0)
         {
-            const double avg_infer_ms = perf_sum_infer_ms / static_cast<double>(perf_samples);
-            const double avg_total_ms = perf_sum_total_ms / static_cast<double>(perf_samples);
-            const double avg_tick_ms = (perf_tick_samples > 0) ? (perf_sum_tick_ms / static_cast<double>(perf_tick_samples)) : 0.0;
-            const double loop_hz = (avg_tick_ms > 1e-6) ? (1000.0 / avg_tick_ms) : 0.0;
-            const double budget_usage_pct = (loop_budget_ms > 1e-6) ? (avg_infer_ms / loop_budget_ms * 100.0) : 0.0;
-
-            std::ostringstream perf_ss;
-            perf_ss << std::fixed << std::setprecision(2)
-                    << "[PERF][LL] infer(ms) avg/max=" << avg_infer_ms << "/" << perf_max_infer_ms
-                    << " total(ms) avg/max=" << avg_total_ms << "/" << perf_max_total_ms;
-            if (perf_tick_samples > 0)
-            {
-                perf_ss << " loop(ms) avg/max=" << avg_tick_ms << "/" << perf_max_tick_ms
-                        << " (" << loop_hz << " Hz)";
-            }
-            perf_ss << " budget=" << loop_budget_ms << "ms"
-                    << " usage=" << budget_usage_pct << "%"
-                    << " roll/pitch_max(deg)=" << perf_max_abs_roll_deg << "/" << perf_max_abs_pitch_deg
-                    << " cmd_norm_max=" << perf_max_cmd_norm
-                    << " over_budget=" << perf_over_budget << "/" << perf_samples;
-            std::cout << LOGGER::INFO << perf_ss.str() << std::endl;
-
-            // Joint diagnostics (1 Hz): print actual joint positions and HipX margin to limits.
-            {
-                constexpr int kDofsToPrint = 12;
-                constexpr double kHipXLimit = 0.523;      // rad
-                constexpr double kHipXWarnMargin = 0.05;  // rad (~2.9 deg)
-                const int hipx_idx[4] = {0, 3, 6, 9};
-
-                std::ostringstream q_ss;
-                q_ss << std::fixed << std::setprecision(3)
-                     << "[PERF][JOINT] q(rad)=";
-                q_ss << "[";
-                for (int i = 0; i < kDofsToPrint; ++i)
-                {
-                    if (i > 0) q_ss << ", ";
-                    q_ss << this->robot_state.motor_state.q[i];
-                }
-                q_ss << "]";
-                std::cout << LOGGER::INFO << q_ss.str() << std::endl;
-
-                std::ostringstream hipx_ss;
-                hipx_ss << std::fixed << std::setprecision(3)
-                        << "[PERF][HIPX] margin_to_limit(rad)=";
-                hipx_ss << "[";
-                bool near_limit = false;
-                for (int j = 0; j < 4; ++j)
-                {
-                    const int idx = hipx_idx[j];
-                    const double q = this->robot_state.motor_state.q[idx];
-                    const double margin = kHipXLimit - std::fabs(q);
-                    if (j > 0) hipx_ss << ", ";
-                    hipx_ss << margin;
-                    if (margin < kHipXWarnMargin) near_limit = true;
-                }
-                hipx_ss << "]";
-                if (near_limit)
-                {
-                    hipx_ss << " [NEAR_LIMIT]";
-                }
-                std::cout << LOGGER::INFO << hipx_ss.str() << std::endl;
-            }
-
             perf_sum_infer_ms = 0.0;
             perf_sum_total_ms = 0.0;
             perf_sum_tick_ms = 0.0;
@@ -1113,28 +1064,19 @@ void RL_Real::RunHighLevel()
     cmd = torch::clamp(cmd_raw, -static_cast<float>(this->nav_clip_commands_), static_cast<float>(this->nav_clip_commands_));
 
     static int dbg_tick = 0;
-    dbg_tick = (dbg_tick + 1) % 10;
-    if (dbg_tick == 0 || new_goal)
+    dbg_tick = (dbg_tick + 1) % 10; // ~1 Hz at nav_dt=0.1
+    if (!this->nav_goal_input_active_.load() && (dbg_tick == 0 || new_goal))
     {
         std::cout << LOGGER::INFO
-                  << "NavHigh raw:[" << cmd_raw[0][0].item<double>() << ", " << cmd_raw[0][1].item<double>() << ", " << cmd_raw[0][2].item<double>() << "]"
-                  << " clipped:[" << cmd[0][0].item<double>() << ", " << cmd[0][1].item<double>() << ", " << cmd[0][2].item<double>() << "]"
-                  << " goal_body_initial:[" << this->nav_position_targets_body_initial_[0][0].item<double>() << ", "
-                  << this->nav_position_targets_body_initial_[0][1].item<double>() << ", "
-                  << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
+                  << "NavHigh raw:[" << cmd_raw[0][0].item<double>() << ", "
+                  << cmd_raw[0][1].item<double>() << ", "
+                  << cmd_raw[0][2].item<double>() << "]"
+                  << " clipped:[" << cmd[0][0].item<double>() << ", "
+                  << cmd[0][1].item<double>() << ", "
+                  << cmd[0][2].item<double>() << "]"
                   << std::endl;
     }
-
-    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
-    {
-        const double tx = pred_target_body[0][0].item<double>();
-        const double ty = pred_target_body[0][1].item<double>();
-        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
-        if (dbg_tick == 0 || new_goal)
-        {
-            std::cout << LOGGER::INFO << "NavPred body:[" << tx << ", " << ty << ", " << tyaw << "]" << std::endl;
-        }
-    }
+    (void)pred_target_body;
 
     this->nav_cmd_x_.store(cmd[0][0].item<double>());
     this->nav_cmd_y_.store(cmd[0][1].item<double>());

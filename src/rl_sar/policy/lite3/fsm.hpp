@@ -210,7 +210,7 @@ public:
 
     void Run() override
     {
-        std::cout << "\r\033[K" << std::flush << LOGGER::INFO << "RL Controller x:" << rl.control.x << " y:" << rl.control.y << " yaw:" << rl.control.yaw << std::flush;
+        // Keep terminal quiet during long runs; high-frequency controller print is disabled.
 
         torch::Tensor _output_dof_pos, _output_dof_vel;
         if (rl.output_dof_pos_queue.try_pop(_output_dof_pos) && rl.output_dof_vel_queue.try_pop(_output_dof_vel))

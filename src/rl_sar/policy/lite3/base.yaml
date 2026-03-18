@@ -16,7 +16,7 @@ lite3:
   wheel_indices: []
   cmd_clip_x: 1.0
   cmd_clip_y: 1.0
-  cmd_clip_yaw: 1.5
+  cmd_clip_yaw: 1.0
   torque_limits: [30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,
