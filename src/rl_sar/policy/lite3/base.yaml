@@ -14,6 +14,9 @@ lite3:
              1.0, 1.0, 1.0]
   num_of_dofs: 12
   wheel_indices: []
+  cmd_clip_x: 1.0
+  cmd_clip_y: 1.0
+  cmd_clip_yaw: 1.5
   torque_limits: [30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,
                   30.0, 30.0, 30.0,

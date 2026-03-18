@@ -185,9 +185,10 @@ void RL_Real::GetState(RobotState<double> *state)
                                 (std::fabs(joy_yaw) > kStickDeadzone);
         if (joy_active)
         {
-            this->control.x = joy_x;
-            this->control.y = joy_y;
-            this->control.yaw = joy_yaw;
+            // Map normalized joystick input [-1, 1] to configured command range.
+            this->control.x = joy_x * this->params.cmd_clip_x;
+            this->control.y = joy_y * this->params.cmd_clip_y;
+            this->control.yaw = joy_yaw * this->params.cmd_clip_yaw;
             this->joystick_override_active_ = true;
         }
         else if (this->joystick_override_active_)
@@ -213,9 +214,11 @@ void RL_Real::GetState(RobotState<double> *state)
     state->imu.quaternion[2] = q[2]; // y
     state->imu.quaternion[3] = q[3]; // z
 
-    state->imu.gyroscope[0] = this->robot_data_->imu.angular_velocity_roll;
-    state->imu.gyroscope[1] = this->robot_data_->imu.angular_velocity_pitch;
-    state->imu.gyroscope[2] = this->robot_data_->imu.angular_velocity_yaw;
+    // Lite3 SDK angular velocity is in deg/s; convert to rad/s for policy consistency.
+    constexpr double kDeg2Rad = M_PI / 180.0;
+    state->imu.gyroscope[0] = this->robot_data_->imu.angular_velocity_roll * kDeg2Rad;
+    state->imu.gyroscope[1] = this->robot_data_->imu.angular_velocity_pitch * kDeg2Rad;
+    state->imu.gyroscope[2] = this->robot_data_->imu.angular_velocity_yaw * kDeg2Rad;
 
     for (int i = 0; i < this->params.num_of_dofs; ++i)
     {
@@ -406,9 +409,9 @@ void RL_Real::RobotControl()
 
     // Command magnitude safety clamp for low-level policy inputs.
     // Applied after GetState so both keyboard and gamepad commands are constrained.
-    this->control.x = std::max(-1.0, std::min(1.0, this->control.x));
-    this->control.y = std::max(-1.0, std::min(1.0, this->control.y));
-    this->control.yaw = std::max(-1.5, std::min(1.5, this->control.yaw));
+    this->control.x = std::max(-this->params.cmd_clip_x, std::min(this->params.cmd_clip_x, this->control.x));
+    this->control.y = std::max(-this->params.cmd_clip_y, std::min(this->params.cmd_clip_y, this->control.y));
+    this->control.yaw = std::max(-this->params.cmd_clip_yaw, std::min(this->params.cmd_clip_yaw, this->control.yaw));
 
     this->StateController(&this->robot_state, &this->robot_command);
     this->SetCommand(&this->robot_command);

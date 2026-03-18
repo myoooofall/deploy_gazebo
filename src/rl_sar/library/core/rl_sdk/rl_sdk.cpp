@@ -405,6 +405,21 @@ void RL::ReadYamlBase(std::string robot_path)
     this->params.joint_names = ReadVectorFromYaml<std::string>(config["joint_names"]);
     this->params.joint_controller_names = ReadVectorFromYaml<std::string>(config["joint_controller_names"]);
     this->params.joint_mapping = ReadVectorFromYaml<int>(config["joint_mapping"]);
+
+    // Optional command clamp limits used by real-time control loop.
+    // Keep backward-compatible defaults when keys are absent.
+    if (config["cmd_clip_x"])
+    {
+        this->params.cmd_clip_x = config["cmd_clip_x"].as<double>();
+    }
+    if (config["cmd_clip_y"])
+    {
+        this->params.cmd_clip_y = config["cmd_clip_y"].as<double>();
+    }
+    if (config["cmd_clip_yaw"])
+    {
+        this->params.cmd_clip_yaw = config["cmd_clip_yaw"].as<double>();
+    }
 }
 
 void RL::ReadYamlRL(std::string robot_path)

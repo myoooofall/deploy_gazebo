@@ -155,6 +155,10 @@ struct ModelParams
     std::vector<std::string> joint_controller_names;
     std::vector<std::string> joint_names;
     std::vector<int> joint_mapping;
+    // Runtime command clamp limits before feeding low-level policy.
+    double cmd_clip_x = 1.0;
+    double cmd_clip_y = 1.0;
+    double cmd_clip_yaw = 1.5;
 };
 
 struct Observations
