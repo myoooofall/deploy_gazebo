@@ -83,11 +83,15 @@ RL_Real::RL_Real()
     );
 
     this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
-        "/camera/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
-        "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
+        "/camera/depth/processed", rclcpp::SystemDefaultsQoS());
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
+
+    std::cout << LOGGER::INFO
+              << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw publish=/camera/depth/processed"
+              << std::endl;
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
@@ -655,17 +659,24 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     // Match 10Hz temporal spacing used by navigation policy (assuming 60Hz depth stream).
     constexpr int kDepthSubsample = 6;
     if ((this->motion_time % kDepthSubsample) == 0) {
-        torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
-            this->processed_depth_publisher);
-        // processed_depth shape: [30, 43], insert函数会处理batch维度
-        depth_buffer.insert(processed_depth);
-
-        const bool first_depth_frame = !g_depth_frame_received.exchange(true);
-        if (first_depth_frame)
+        try
         {
-            std::cout << LOGGER::INFO
-                      << "[NAV][DEPTH] first processed depth frame received on /camera/camera/depth/image_rect_raw"
-                      << std::endl;
+            torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
+                this->processed_depth_publisher);
+            // processed_depth shape: [30, 43], insert函数会处理batch维度
+            depth_buffer.insert(processed_depth);
+
+            const bool first_depth_frame = !g_depth_frame_received.exchange(true);
+            if (first_depth_frame)
+            {
+                std::cout << LOGGER::INFO
+                          << "[NAV][DEPTH] first processed depth frame received on /camera/depth/image_rect_raw"
+                          << std::endl;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cout << LOGGER::ERROR << "[NAV][DEPTH] processing failed: " << e.what() << std::endl;
         }
     }
     ++this->motion_time;
@@ -986,7 +997,7 @@ void RL_Real::RunHighLevel()
     {
         if (!g_depth_frame_received.load())
         {
-            this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/camera/depth/image_rect_raw");
+            this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/depth/image_rect_raw");
             return;
         }
         torch::Tensor depth = depth_buffer.get_depth_vec();
