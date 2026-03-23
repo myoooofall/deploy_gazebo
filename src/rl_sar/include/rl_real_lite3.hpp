@@ -32,10 +32,10 @@
 #include "retroid_gamepad.h"
 #include "gamepad_keys.h"
 
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
 #include <ros/ros.h>
 #include <geometry_msgs/Twist.h>
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -46,7 +46,7 @@
 namespace plt = matplotlibcpp;
 
 class RL_Real : public RL
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
     , public rclcpp::Node
 #endif
 {
@@ -156,7 +156,7 @@ private:
     std::vector<double> mapped_joint_positions;
     std::vector<double> mapped_joint_velocities;
 
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
     // depth
     int motion_time = 1;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
@@ -168,11 +168,11 @@ private:
     void NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg);
 #endif
 
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     geometry_msgs::Twist cmd_vel;
     ros::Subscriber cmd_vel_subscriber;
     void CmdvelCallback(const geometry_msgs::Twist::ConstPtr &msg);
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     geometry_msgs::msg::Twist cmd_vel;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_subscriber;
     void CmdvelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);

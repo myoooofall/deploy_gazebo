@@ -19,14 +19,14 @@ static double WrapToPi(double a)
 }
 
 RL_Real::RL_Real()
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
     : rclcpp::Node("rl_real_node")
 #endif
 {
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     ros::NodeHandle nh;
     this->cmd_vel_subscriber = nh.subscribe<geometry_msgs::Twist>("/cmd_vel", 10, &RL_Real::CmdvelCallback, this);
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     this->cmd_vel_subscriber = this->create_subscription<geometry_msgs::msg::Twist>(
         "/cmd_vel", rclcpp::SystemDefaultsQoS(),
         [this] (const geometry_msgs::msg::Twist::SharedPtr msg) {this->CmdvelCallback(msg);}
@@ -75,7 +75,7 @@ RL_Real::RL_Real()
     this->first_flag_ = true;
     this->gamepad_ptr_->StartDataThread();
 
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
     // hierarchical navigation: body-frame goal only (no odom dependency)
     this->nav_goal_body_subscriber = this->create_subscription<geometry_msgs::msg::Pose2D>(
         "/nav_goal_body", rclcpp::SystemDefaultsQoS(),
@@ -653,7 +653,7 @@ void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
     q[3] = cr * cp * sy - sr * sp * cy;  // z
 }
 
-#if defined(USE_ROS2) && defined(USE_ROS)
+#if defined(USE_ROS2)
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     // Match 10Hz temporal spacing used by navigation policy (assuming 60Hz depth stream).
@@ -1156,11 +1156,11 @@ void RL_Real::RunHighLevel()
 }
 
 
-#if !defined(USE_CMAKE) && defined(USE_ROS)
+#if !defined(USE_CMAKE) && (defined(USE_ROS1) || defined(USE_ROS2))
 void RL_Real::CmdvelCallback(
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     const geometry_msgs::Twist::ConstPtr &msg
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     const geometry_msgs::msg::Twist::SharedPtr msg
 #endif
 )
@@ -1169,7 +1169,7 @@ void RL_Real::CmdvelCallback(
 }
 #endif
 
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
 void signalHandler(int signum)
 {
     ros::shutdown();
@@ -1179,16 +1179,16 @@ void signalHandler(int signum)
 
 int main(int argc, char **argv)
 {
-#if defined(USE_ROS1) && defined(USE_ROS)
+#if defined(USE_ROS1)
     signal(SIGINT, signalHandler);
     ros::init(argc, argv, "rl_sar");
     RL_Real rl_sar;
     ros::spin();
-#elif defined(USE_ROS2) && defined(USE_ROS)
+#elif defined(USE_ROS2)
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<RL_Real>());
     rclcpp::shutdown();
-#elif defined(USE_CMAKE) || !defined(USE_ROS)
+#elif defined(USE_CMAKE) || (!defined(USE_ROS1) && !defined(USE_ROS2))
     RL_Real rl_sar;
     while (1) { sleep(10); }
 #endif
