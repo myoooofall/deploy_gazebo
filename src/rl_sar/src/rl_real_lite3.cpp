@@ -81,7 +81,7 @@ RL_Real::RL_Real()
     );
 
     this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
-        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        "/camera/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
@@ -657,6 +657,14 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
             this->processed_depth_publisher);
         // processed_depth shape: [30, 43], insert函数会处理batch维度
         depth_buffer.insert(processed_depth);
+
+        const bool first_depth_frame = !this->depth_frame_received_.exchange(true);
+        if (first_depth_frame)
+        {
+            std::cout << LOGGER::INFO
+                      << "[NAV][DEPTH] first processed depth frame received on /camera/camera/depth/image_rect_raw"
+                      << std::endl;
+        }
     }
     ++this->motion_time;
 }
@@ -974,12 +982,18 @@ void RL_Real::RunHighLevel()
     torch::Tensor vision_feat;
     try
     {
-        torch::Tensor depth = depth_buffer.get_depth_vec().to(torch::kFloat32);
+        if (!this->depth_frame_received_.load())
+        {
+            this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/camera/depth/image_rect_raw");
+            return;
+        }
+        torch::Tensor depth = depth_buffer.get_depth_vec();
         if (!depth.defined())
         {
             this->DisableNavigationWithError("vision_input", "depth tensor is undefined");
             return;
         }
+        depth = depth.to(torch::kFloat32);
         if (depth.dim() != 4)
         {
             std::ostringstream oss;

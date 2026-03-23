@@ -159,6 +159,7 @@ private:
 #if defined(USE_ROS2) && defined(USE_ROS)
     // depth
     int motion_time = 1;
+    std::atomic<bool> depth_frame_received_{false};
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
     void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);

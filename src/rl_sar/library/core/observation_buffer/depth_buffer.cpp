@@ -1,6 +1,8 @@
 #include "depth_buffer.hpp"
 #include <opencv2/highgui.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+#include <iomanip>
+#include <iostream>
 // DepthBuffer implementation
 DepthBuffer::DepthBuffer() {}
 
@@ -150,15 +152,29 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
         processed_publisher->publish(*image_msg);
     }
     
+    const float raw_depth_min_m = depth_tensor.min().item<float>();
+    const float raw_depth_max_m = depth_tensor.max().item<float>();
+    const float raw_depth_mean_m = depth_tensor.mean().item<float>();
+
     // 归一化到-0.5到0.5范围 (用于推理)
-    
-    depth_tensor = depth_tensor/5-1 ;
+    depth_tensor = depth_tensor / 5 - 1;
     depth_tensor = torch::nn::functional::avg_pool2d(
         depth_tensor.unsqueeze(0).unsqueeze(0),
         torch::nn::functional::AvgPool2dFuncOptions({2, 2}).stride({2, 2})
     ).squeeze(0).squeeze(0);
-    // Final shape after downsample: [30, 43]
-    // 打印调整后的深度值范围
-    // std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
+
+    const float model_depth_min = depth_tensor.min().item<float>();
+    const float model_depth_max = depth_tensor.max().item<float>();
+    const float model_depth_mean = depth_tensor.mean().item<float>();
+
+    std::cout << std::fixed << std::setprecision(4)
+              << "[NAV][DEPTH] raw_m[min=" << raw_depth_min_m
+              << ", max=" << raw_depth_max_m
+              << ", mean=" << raw_depth_mean_m
+              << "] model[min=" << model_depth_min
+              << ", max=" << model_depth_max
+              << ", mean=" << model_depth_mean
+              << "]" << std::endl;
+
     return depth_tensor;  // Shape: [30, 43]
 }
