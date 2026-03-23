@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <sstream>
 
+static std::atomic<bool> g_depth_frame_received{false};
+
 static double WrapToPi(double a)
 {
     while (a > M_PI) a -= 2.0 * M_PI;
@@ -658,7 +660,7 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
         // processed_depth shape: [30, 43], insert函数会处理batch维度
         depth_buffer.insert(processed_depth);
 
-        const bool first_depth_frame = !this->depth_frame_received_.exchange(true);
+        const bool first_depth_frame = !g_depth_frame_received.exchange(true);
         if (first_depth_frame)
         {
             std::cout << LOGGER::INFO
@@ -982,7 +984,7 @@ void RL_Real::RunHighLevel()
     torch::Tensor vision_feat;
     try
     {
-        if (!this->depth_frame_received_.load())
+        if (!g_depth_frame_received.load())
         {
             this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/camera/depth/image_rect_raw");
             return;
