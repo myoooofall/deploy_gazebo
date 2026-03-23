@@ -1,6 +1,6 @@
 #include "depth_buffer.hpp"
 #include <opencv2/highgui.hpp>
-#include <algorithm>
+#include <sensor_msgs/image_encodings.hpp>
 // DepthBuffer implementation
 DepthBuffer::DepthBuffer() {}
 
@@ -30,23 +30,22 @@ void DepthBuffer::reset(std::vector<int> reset_idxs, torch::Tensor new_depth)
 
 void DepthBuffer::insert(torch::Tensor new_depth)
 {
-    if (include_history_steps <= 0)
-    {
-        return;
-    }
 
-    if (!initialized)
-    {
-        // First insert: fill the whole history with the first valid frame.
+    
+    if (!initialized) {
+        // 第一次插入：用第一帧复制满整个buffer
         for (int i = 0; i < include_history_steps; ++i)
         {
             depth_buf.index({0, i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
         }
         initialized = true;
-    }
-    else
-    {
-        // Generic FIFO update for any include_history_steps >= 1.
+    } else {
+        // 后续插入：FIFO队列逻辑（索引越大越新）
+        if (include_history_steps <= 1)
+        {
+            depth_buf.index({0, 0, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) = new_depth;
+            return;
+        }
         for (int i = 0; i < include_history_steps - 1; ++i)
         {
             depth_buf.index({0, i, torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)}) =
@@ -58,39 +57,61 @@ void DepthBuffer::insert(torch::Tensor new_depth)
 
 torch::Tensor DepthBuffer::get_depth_vec()
 {
-    // Keep one-frame delay: model consumes history_steps - 1 frames.
-    const int hist = std::max(1, include_history_steps - 1);
-    return depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, hist), torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+    // Return history window with one-frame delay (drop newest frame):
+    // - include_history_steps=9 -> return [0..7] (8 frames)
+    // - include_history_steps=2 -> return [0]    (1 frame)
+    // - include_history_steps=1 -> return [0]
+    if (include_history_steps <= 1)
+    {
+        return depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 1),
+                                torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
+    }
+    return depth_buf.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, include_history_steps - 1),
+                            torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(torch::indexing::None)});
 }
 
 torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::SharedPtr msg,
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_publisher)  
 {
-   
-    
-    // 正确读取16位深度数据
-    std::vector<uint16_t> depth_data;
-    depth_data.reserve(msg->width * msg->height);
-    const uint8_t* data_ptr = msg->data.data();
-    
-    for (size_t i = 0; i < msg->data.size(); i += 2) {
-        uint16_t depth;
-        if (msg->is_bigendian) {
-            depth = (static_cast<uint16_t>(data_ptr[i]) << 8) | static_cast<uint16_t>(data_ptr[i + 1]);
-        } else {
-            depth = (static_cast<uint16_t>(data_ptr[i + 1]) << 8) | static_cast<uint16_t>(data_ptr[i]);
+    torch::Tensor depth_tensor;
+    try
+    {
+        if (msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1 ||
+            msg->encoding == sensor_msgs::image_encodings::MONO16)
+        {
+            // 16UC1: millimeters -> meters
+            auto cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_16UC1);
+            const cv::Mat &depth_u16 = cv_ptr->image;
+            cv::Mat depth_f32;
+            depth_u16.convertTo(depth_f32, CV_32FC1, 1.0 / 1000.0);
+            depth_tensor = torch::from_blob(
+                depth_f32.data,
+                {depth_f32.rows, depth_f32.cols},
+                torch::kFloat32).clone();
         }
-        depth_data.push_back(depth);
+        else if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
+        {
+            // 32FC1: already in meters
+            auto cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_32FC1);
+            const cv::Mat &depth_f32 = cv_ptr->image;
+            depth_tensor = torch::from_blob(
+                depth_f32.data,
+                {depth_f32.rows, depth_f32.cols},
+                torch::kFloat32).clone();
+        }
+        else
+        {
+            throw std::runtime_error("Unsupported depth encoding: " + msg->encoding);
+        }
     }
-    
-    torch::Tensor depth_tensor = torch::from_blob(depth_data.data(), 
-        {msg->height, msg->width}, torch::kInt16).clone();
-    
-    // // 打印原始深度值范围
-    // std::cout << "原始深度值范围: [" << depth_tensor.min().item<int16_t>() << ", " << depth_tensor.max().item<int16_t>() << "]" << std::endl;
-    
-    // 转换为float类型并转换为米
-    depth_tensor = depth_tensor.to(torch::kFloat32) / 1000.0;  // 转换为米
+    catch (const cv_bridge::Exception &e)
+    {
+        throw std::runtime_error(std::string("Depth decode failed: ") + e.what());
+    }
+
+    // training-aligned invalid-depth handling: invalid -> far range (5m)
+    torch::Tensor valid_mask = torch::isfinite(depth_tensor) & (depth_tensor > 0.0);
+    depth_tensor = torch::where(valid_mask, depth_tensor, torch::full_like(depth_tensor, 5.0));
     
     // First resize to intermediate size (60, 106): height=60, width=106
     depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // Add batch and channel dims for interpolate
@@ -110,7 +131,7 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     // std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
     
     // 将深度值裁剪到0.05-5.0米范围
-    depth_tensor = torch::clamp(depth_tensor, 0.05, 5.0);
+    depth_tensor = torch::clamp(depth_tensor, 0.1, 5.0);
     
     // 发布用于可视化的深度图（在归一化之前保存原始值）
     if (processed_publisher) {
@@ -132,9 +153,12 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     // 归一化到-0.5到0.5范围 (用于推理)
     
     depth_tensor = depth_tensor/5-1 ;
-    
-    // depth_tensor shape is already [60, 86] at this point, no need to resize
+    depth_tensor = torch::nn::functional::avg_pool2d(
+        depth_tensor.unsqueeze(0).unsqueeze(0),
+        torch::nn::functional::AvgPool2dFuncOptions({2, 2}).stride({2, 2})
+    ).squeeze(0).squeeze(0);
+    // Final shape after downsample: [30, 43]
     // 打印调整后的深度值范围
     // std::cout << "调整后的深度值范围: [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
-    return depth_tensor;  // Shape: [60, 86]
+    return depth_tensor;  // Shape: [30, 43]
 }

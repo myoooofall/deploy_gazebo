@@ -125,10 +125,11 @@ private:
     int nav_obs_hist_len_ = 10;
     int nav_obs_io_hist_len_ = 10;
     int nav_highfreq_hist_len_ = 20;
-    int nav_vision_channels_ = 1;       // number of depth frames consumed by vision model
+    int nav_vision_channels_ = 1;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
-    double nav_clip_commands_ = 3.0;    // default clip
+    double nav_clip_lin_ = 1.0;         // clip for cmd x/y
+    double nav_clip_ang_ = 1.0;         // clip for cmd yaw
 
     std::mutex nav_highfreq_mutex_;
     std::mutex nav_state_mutex_;

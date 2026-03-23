@@ -85,7 +85,7 @@ RL_Real::RL_Real()
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);  // history = vision_channels + 1 (one-frame delay)
+    depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
 #endif
 
     // init hierarchical nav policy (best-effort; safe to fail)
@@ -650,15 +650,15 @@ void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
 #if defined(USE_ROS2) && defined(USE_ROS)
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    // 只在每个时间步更新一次深度图
-    if (this->motion_time % 5 == 0) {  // 每5个时间步更新一次
+    // Match 10Hz temporal spacing used by navigation policy (assuming 60Hz depth stream).
+    constexpr int kDepthSubsample = 6;
+    if ((this->motion_time % kDepthSubsample) == 0) {
         torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
             this->processed_depth_publisher);
-        // processed_depth shape: [60, 86], insert函数会处理batch维度
+        // processed_depth shape: [30, 43], insert函数会处理batch维度
         depth_buffer.insert(processed_depth);
-        this->motion_time = 1;
     }
-    this->motion_time++;
+    ++this->motion_time;
 }
 
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
@@ -710,16 +710,44 @@ bool RL_Real::InitHierarchicalNav()
     // optional params (safe defaults)
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
-    if (config["clip_commands"]) this->nav_clip_commands_ = config["clip_commands"].as<double>();
-    if (config["vision_channels"]) this->nav_vision_channels_ = std::max(1, config["vision_channels"].as<int>());
-    this->nav_timer_left_.store(this->nav_episode_length_s_);
-    this->nav_time_io_.store(0.0);
-    this->nav_time_io_hf_.store(0.0);
-    depth_buffer = DepthBuffer(1, 60, 86, this->nav_vision_channels_ + 1);
+    if (config["clip_commands_lin"])
+    {
+        this->nav_clip_lin_ = config["clip_commands_lin"].as<double>();
+    }
+    if (config["clip_commands_ang"])
+    {
+        this->nav_clip_ang_ = config["clip_commands_ang"].as<double>();
+    }
+    if (config["clip_commands"] && !config["clip_commands_lin"] && !config["clip_commands_ang"])
+    {
+        const double legacy_clip = config["clip_commands"].as<double>();
+        this->nav_clip_lin_ = legacy_clip;
+        this->nav_clip_ang_ = legacy_clip;
+    }
+    this->nav_clip_lin_ = std::fabs(this->nav_clip_lin_);
+    this->nav_clip_ang_ = std::fabs(this->nav_clip_ang_);
+    if (config["vision_channels"])
+    {
+        const int channels = config["vision_channels"].as<int>();
+        this->nav_vision_channels_ = (channels > 0) ? channels : 1;
+    }
+    if (this->nav_vision_channels_ < 1)
+    {
+        this->nav_vision_channels_ = 1;
+    }
+
+    // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
+    depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
     std::cout << LOGGER::INFO
               << "Nav vision_channels=" << this->nav_vision_channels_
               << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
+              << ", clip_lin=" << this->nav_clip_lin_
+              << ", clip_ang=" << this->nav_clip_ang_
               << std::endl;
+
+    this->nav_timer_left_.store(this->nav_episode_length_s_);
+    this->nav_time_io_.store(0.0);
+    this->nav_time_io_hf_.store(0.0);
 
     this->nav_high_model_path_ = nav_dir + "/" + high_name;
     this->nav_vision_model_path_ = nav_dir + "/" + vision_name;
@@ -749,9 +777,9 @@ bool RL_Real::InitHierarchicalNav()
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
-    const int hf_dim = 1 + 3 + 3 + dof + dof + dof ;
-    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof;
-    const int obs_io_dim = 3 + 3 + 1 + 3 + 3 + dof + dof + dof;
+    const int hf_dim = 1 + 3 + 3 + dof + dof + dof - 12;
+    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
+    const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
 
     this->nav_highfreq_buf_ = ObservationBuffer(1, {hf_dim}, this->nav_highfreq_hist_len_, "time");
     this->nav_obs_hist_buf_ = ObservationBuffer(1, {obs_dim}, this->nav_obs_hist_len_, "time");
@@ -797,19 +825,7 @@ void RL_Real::UpdateHighFrequencyObs()
     torch::Tensor dof_pos_term = (dof_pos - this->params.default_dof_pos) * static_cast<float>(this->params.dof_pos_scale);
     torch::Tensor dof_vel_term = dof_vel * static_cast<float>(this->params.dof_vel_scale);
 
-    torch::Tensor actions = torch::zeros({1, dof}, torch::dtype(torch::kFloat32));
-    {
-        std::lock_guard<std::mutex> lock(this->nav_last_actions_mutex_);
-        if (static_cast<int>(this->nav_last_actions_.size()) == dof)
-        {
-            for (int i = 0; i < dof; ++i)
-            {
-                actions[0][i] = this->nav_last_actions_[i];
-            }
-        }
-    }
-
-    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions}, 1);
+    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term}, 1);
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
@@ -895,18 +911,14 @@ void RL_Real::RunHighLevel()
             }
         }
     }
-    torch::Tensor high_command_scaled = this->nav_high_command_ * this->params.commands_scale.to(torch::kFloat32);
-
     torch::Tensor obs_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
-        high_command_scaled,
         timer_tensor,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        actions,
     }, 1);
 
     torch::Tensor obs_io_frame = torch::cat({
@@ -917,7 +929,6 @@ void RL_Real::RunHighLevel()
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        actions,
     }, 1);
 
     torch::Tensor obs_io_frame_hf = torch::cat({
@@ -926,7 +937,6 @@ void RL_Real::RunHighLevel()
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
-        actions,
     }, 1);
 
     if (new_goal)
@@ -954,7 +964,6 @@ void RL_Real::RunHighLevel()
         obs_ids_20.push_back(i);
     }
 
-    torch::Tensor obs_hist = this->nav_obs_hist_buf_.get_obs_vec(obs_ids_10);
     torch::Tensor obs_io_hist = this->nav_obs_io_hist_buf_.get_obs_vec(obs_ids_10);
     torch::Tensor hf_hist;
     {
@@ -966,28 +975,34 @@ void RL_Real::RunHighLevel()
     try
     {
         torch::Tensor depth = depth_buffer.get_depth_vec().to(torch::kFloat32);
-        if (!depth.defined() || depth.numel() == 0)
+        if (!depth.defined())
         {
-            throw std::runtime_error("depth history is empty");
+            this->DisableNavigationWithError("vision_input", "depth tensor is undefined");
+            return;
         }
         if (depth.dim() != 4)
         {
-            throw std::runtime_error("depth history rank is not 4");
+            std::ostringstream oss;
+            oss << "depth tensor rank mismatch, expected 4D [B,C,H,W], got dim=" << depth.dim();
+            this->DisableNavigationWithError("vision_input", oss.str());
+            return;
         }
-        const int depth_channels = static_cast<int>(depth.size(1));
-        if (depth_channels != this->nav_vision_channels_)
+        const int64_t channels = depth.size(1);
+        if (channels != static_cast<int64_t>(this->nav_vision_channels_))
         {
-            throw std::runtime_error("depth history channels mismatch config vision_channels");
+            std::ostringstream oss;
+            oss << "depth channels mismatch, expected " << this->nav_vision_channels_
+                << ", got " << channels
+                << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
+            this->DisableNavigationWithError("vision_input", oss.str());
+            return;
         }
-        vision_feat = this->nav_vision_model_.forward({depth}).toTensor().to(torch::kFloat32);
-        if (vision_feat.dim() == 1)
-        {
-            vision_feat = vision_feat.unsqueeze(0);
-        }
-        if (!vision_feat.defined() || vision_feat.numel() == 0)
-        {
-            throw std::runtime_error("vision model output is empty");
-        }
+        vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+    }
+    catch (const c10::Error &e)
+    {
+        this->DisableNavigationWithError("vision_forward", e.what());
+        return;
     }
     catch (const std::exception &e)
     {
@@ -1005,8 +1020,13 @@ void RL_Real::RunHighLevel()
     torch::jit::IValue out;
     try
     {
-        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_hist, obs_io_hist, vision_feat, hf_hist};
+        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
         out = this->nav_high_model_.forward(inputs);
+    }
+    catch (const c10::Error &e)
+    {
+        this->DisableNavigationWithError("high_forward", e.what());
+        return;
     }
     catch (const std::exception &e)
     {
@@ -1050,33 +1070,54 @@ void RL_Real::RunHighLevel()
             }
         }
     }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError("output_unpack", e.what());
+        return;
+    }
     catch (...)
     {
+        this->DisableNavigationWithError("output_unpack", "unknown exception");
         return;
     }
 
     if (!cmd.defined() || cmd.numel() < 3)
     {
+        this->DisableNavigationWithError("output_validate", "invalid high-level output: command tensor missing or too short");
         return;
     }
 
     const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
-    cmd = torch::clamp(cmd_raw, -static_cast<float>(this->nav_clip_commands_), static_cast<float>(this->nav_clip_commands_));
+    const auto cmd_device = cmd_raw.device();
+    const torch::Tensor clip_high = torch::tensor(
+        {static_cast<float>(this->nav_clip_lin_), static_cast<float>(this->nav_clip_lin_), static_cast<float>(this->nav_clip_ang_)},
+        torch::TensorOptions().dtype(torch::kFloat32).device(cmd_device)).view({1, 3});
+    const torch::Tensor clip_low = -clip_high;
+    cmd = torch::max(torch::min(cmd_raw, clip_high), clip_low);
 
     static int dbg_tick = 0;
-    dbg_tick = (dbg_tick + 1) % 10; // ~1 Hz at nav_dt=0.1
-    if (!this->nav_goal_input_active_.load() && (dbg_tick == 0 || new_goal))
+    dbg_tick = (dbg_tick + 1) % 10;
+    if (dbg_tick == 0 || new_goal)
     {
         std::cout << LOGGER::INFO
-                  << "NavHigh raw:[" << cmd_raw[0][0].item<double>() << ", "
-                  << cmd_raw[0][1].item<double>() << ", "
-                  << cmd_raw[0][2].item<double>() << "]"
-                  << " clipped:[" << cmd[0][0].item<double>() << ", "
-                  << cmd[0][1].item<double>() << ", "
-                  << cmd[0][2].item<double>() << "]"
+                  << "NavHigh raw:[" << cmd_raw[0][0].item<double>() << ", " << cmd_raw[0][1].item<double>() << ", " << cmd_raw[0][2].item<double>() << "]"
+                  << " clipped:[" << cmd[0][0].item<double>() << ", " << cmd[0][1].item<double>() << ", " << cmd[0][2].item<double>() << "]"
+                  << " goal_body_initial:[" << this->nav_position_targets_body_initial_[0][0].item<double>() << ", "
+                  << this->nav_position_targets_body_initial_[0][1].item<double>() << ", "
+                  << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
                   << std::endl;
     }
-    (void)pred_target_body;
+
+    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
+    {
+        const double tx = pred_target_body[0][0].item<double>();
+        const double ty = pred_target_body[0][1].item<double>();
+        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
+        if (dbg_tick == 0 || new_goal)
+        {
+            std::cout << LOGGER::INFO << "NavPred body:[" << tx << ", " << ty << ", " << tyaw << "]" << std::endl;
+        }
+    }
 
     this->nav_cmd_x_.store(cmd[0][0].item<double>());
     this->nav_cmd_y_.store(cmd[0][1].item<double>());
