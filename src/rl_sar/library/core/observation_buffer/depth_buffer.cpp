@@ -166,15 +166,19 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     const float model_depth_min = depth_tensor.min().item<float>();
     const float model_depth_max = depth_tensor.max().item<float>();
     const float model_depth_mean = depth_tensor.mean().item<float>();
-
-    std::cout << std::fixed << std::setprecision(4)
-              << "[NAV][DEPTH] raw_m[min=" << raw_depth_min_m
-              << ", max=" << raw_depth_max_m
-              << ", mean=" << raw_depth_mean_m
-              << "] model[min=" << model_depth_min
-              << ", max=" << model_depth_max
-              << ", mean=" << model_depth_mean
-              << "]" << std::endl;
+    static bool depth_stats_logged_once = false;
+    if (!depth_stats_logged_once)
+    {
+        std::cout << std::fixed << std::setprecision(4)
+                  << "[NAV][DEPTH] raw_m[min=" << raw_depth_min_m
+                  << ", max=" << raw_depth_max_m
+                  << ", mean=" << raw_depth_mean_m
+                  << "] model[min=" << model_depth_min
+                  << ", max=" << model_depth_max
+                  << ", mean=" << model_depth_mean
+                  << "]" << std::endl;
+        depth_stats_logged_once = true;
+    }
 
     return depth_tensor;  // Shape: [30, 43]
 }
