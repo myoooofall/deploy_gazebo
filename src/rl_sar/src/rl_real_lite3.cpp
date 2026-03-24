@@ -708,7 +708,18 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
     }
 
     sensor_msgs::msg::Imu imu_msg;
-    imu_msg.header.stamp = this->get_clock()->now();
+    // Use Lite3 SDK IMU timestamp (ms) so IMU/LiDAR stay in the same time domain.
+    const int64_t imu_stamp_ms = static_cast<int64_t>(this->robot_data_->imu.timestamp);
+    if (imu_stamp_ms > 0)
+    {
+        imu_msg.header.stamp.sec = static_cast<int32_t>(imu_stamp_ms / 1000);
+        imu_msg.header.stamp.nanosec = static_cast<uint32_t>((imu_stamp_ms % 1000) * 1000000);
+    }
+    else
+    {
+        // Fallback to ROS clock only when SDK timestamp is unavailable.
+        imu_msg.header.stamp = this->get_clock()->now();
+    }
     imu_msg.header.frame_id = "base_link";
 
     imu_msg.orientation.w = state.imu.quaternion[0];
@@ -730,7 +741,8 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
     {
         this->sdk_imu_pub_started_ = true;
         std::cout << LOGGER::INFO
-                  << "[SLAM][SDK2ROS] first /imu/data published from Lite3 SDK"
+                  << "[SLAM][SDK2ROS] first /imu/data published from Lite3 SDK, stamp_ms="
+                  << imu_stamp_ms
                   << std::endl;
     }
 }
