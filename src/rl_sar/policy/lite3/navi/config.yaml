@@ -6,7 +6,7 @@ lite3/navi:
   high_model_name: "backbone_1.pt"
   vision_model_name: "head_1.pt"
   nav_dt: 0.1
-  nav_episode_length_s: 30.0
+  nav_episode_length_s: 45.0
   clip_commands_lin: 1.0
   clip_commands_ang: 1.0
   vision_channels: 8

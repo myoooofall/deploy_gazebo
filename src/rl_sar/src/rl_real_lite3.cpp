@@ -107,13 +107,15 @@ RL_Real::RL_Real()
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/depth/processed", rclcpp::SystemDefaultsQoS());
+    this->processed_depth_norm_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+        "/camera/depth/processed_norm", rclcpp::SystemDefaultsQoS());
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
 
     this->sdk_imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
         "/imu/data", rclcpp::SystemDefaultsQoS());
 
     std::cout << LOGGER::INFO
-              << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw publish=/camera/depth/processed"
+              << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw publish=/camera/depth/processed,/camera/depth/processed_norm"
               << std::endl;
     std::cout << LOGGER::INFO
               << "[SLAM][SDK2ROS] publish=/imu/data (sensor_msgs/Imu, source=lite3_sdk)"
@@ -755,7 +757,8 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
         try
         {
             torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
-                this->processed_depth_publisher);
+                this->processed_depth_publisher,
+                this->processed_depth_norm_publisher);
             // processed_depth shape: [30, 43], insert函数会处理batch维度
             depth_buffer.insert(processed_depth);
 

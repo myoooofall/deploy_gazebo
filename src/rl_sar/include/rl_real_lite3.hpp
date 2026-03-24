@@ -169,6 +169,7 @@ private:
     int motion_time = 1;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_norm_publisher;
     void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
 
     // nav interface

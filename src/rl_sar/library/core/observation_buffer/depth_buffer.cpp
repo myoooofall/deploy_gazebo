@@ -73,7 +73,8 @@ torch::Tensor DepthBuffer::get_depth_vec()
 }
 
 torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::SharedPtr msg,
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_publisher)  
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_publisher,
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_norm_publisher)
 {
     torch::Tensor depth_tensor;
     try
@@ -111,9 +112,9 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
         throw std::runtime_error(std::string("Depth decode failed: ") + e.what());
     }
 
-    // training-aligned invalid-depth handling: invalid -> far range (5m)
+    // Invalid-depth handling for deployment debugging: invalid -> nearest range (0.1m)
     torch::Tensor valid_mask = torch::isfinite(depth_tensor) & (depth_tensor > 0.0);
-    depth_tensor = torch::where(valid_mask, depth_tensor, torch::full_like(depth_tensor, 5.0));
+    depth_tensor = torch::where(valid_mask, depth_tensor, torch::full_like(depth_tensor, 0.1));
     
     // First resize to intermediate size (60, 106): height=60, width=106
     depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // Add batch and channel dims for interpolate
@@ -156,12 +157,22 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     const float raw_depth_max_m = depth_tensor.max().item<float>();
     const float raw_depth_mean_m = depth_tensor.mean().item<float>();
 
-    // 归一化到-0.5到0.5范围 (用于推理)
+    // 归一化到[-1, 0]范围 (用于推理)
     depth_tensor = depth_tensor / 5 - 1;
     depth_tensor = torch::nn::functional::avg_pool2d(
         depth_tensor.unsqueeze(0).unsqueeze(0),
         torch::nn::functional::AvgPool2dFuncOptions({2, 2}).stride({2, 2})
     ).squeeze(0).squeeze(0);
+
+    // Publish normalized depth used by model inference.
+    if (processed_norm_publisher) {
+        torch::Tensor norm_tensor = depth_tensor.contiguous();
+        const int h_norm = norm_tensor.size(0);
+        const int w_norm = norm_tensor.size(1);
+        cv::Mat norm_mat(h_norm, w_norm, CV_32FC1, norm_tensor.data_ptr<float>());
+        auto norm_msg = cv_bridge::CvImage(msg->header, "32FC1", norm_mat).toImageMsg();
+        processed_norm_publisher->publish(*norm_msg);
+    }
 
     const float model_depth_min = depth_tensor.min().item<float>();
     const float model_depth_max = depth_tensor.max().item<float>();
