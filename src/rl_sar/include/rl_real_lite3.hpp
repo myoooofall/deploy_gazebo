@@ -38,8 +38,13 @@
 #elif defined(USE_ROS2)
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/pose2_d.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 #endif
 
 #include "matplotlibcpp.h"
@@ -84,6 +89,9 @@ private:
     void UDPRecv();
     void EulerToQuaternion(float roll, float pitch, float yaw, float q[4]);
     void HandleKeyboard();
+#if defined(USE_ROS2)
+    void PublishSlamImuFromSdk(const RobotState<double> &state);
+#endif
 
     //Retroid Gamepad
     std::shared_ptr<RetroidGamepad> gamepad_ptr_;
@@ -166,6 +174,42 @@ private:
     // nav interface
     rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr nav_goal_body_subscriber;
     void NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg);
+
+    // map-frame target comparison interface
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_subscriber_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_actual_map_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_pred_map_publisher_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr nav_goal_compare_markers_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr nav_goal_error_body_publisher_;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr sdk_imu_publisher_;
+    bool sdk_imu_pub_started_ = false;
+
+    void OdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+    void PublishNavGoalComparison(
+        const torch::Tensor &pred_target_body,
+        uint64_t goal_seq,
+        bool new_goal);
+    bool TryProjectBodyTargetToMap(
+        double body_x,
+        double body_y,
+        double body_yaw,
+        double base_x,
+        double base_y,
+        double base_yaw,
+        geometry_msgs::msg::PoseStamped *pose_out) const;
+
+    // latest localization pose (map -> base_link)
+    mutable std::mutex odom_pose_mutex_;
+    bool odom_pose_received_ = false;
+    double odom_map_x_ = 0.0;
+    double odom_map_y_ = 0.0;
+    double odom_map_yaw_ = 0.0;
+    rclcpp::Time odom_stamp_{0, 0, RCL_ROS_TIME};
+
+    // goal projected in map frame and latched per goal sequence
+    bool nav_goal_actual_map_valid_ = false;
+    uint64_t nav_goal_actual_map_goal_seq_ = 0;
+    geometry_msgs::msg::PoseStamped nav_goal_actual_map_pose_;
 #endif
 
 #if defined(USE_ROS1)

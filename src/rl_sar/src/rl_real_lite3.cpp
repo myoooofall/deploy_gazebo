@@ -18,6 +18,26 @@ static double WrapToPi(double a)
     return a;
 }
 
+#if defined(USE_ROS2)
+static geometry_msgs::msg::Quaternion YawToQuaternion(double yaw)
+{
+    geometry_msgs::msg::Quaternion q;
+    const double half = yaw * 0.5;
+    q.w = std::cos(half);
+    q.x = 0.0;
+    q.y = 0.0;
+    q.z = std::sin(half);
+    return q;
+}
+
+static double QuaternionToYaw(const geometry_msgs::msg::Quaternion &q)
+{
+    const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+    const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+    return std::atan2(siny_cosp, cosy_cosp);
+}
+#endif
+
 RL_Real::RL_Real()
 #if defined(USE_ROS2)
     : rclcpp::Node("rl_real_node")
@@ -89,8 +109,31 @@ RL_Real::RL_Real()
         "/camera/depth/processed", rclcpp::SystemDefaultsQoS());
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
 
+    this->sdk_imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
+        "/imu/data", rclcpp::SystemDefaultsQoS());
+
     std::cout << LOGGER::INFO
               << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw publish=/camera/depth/processed"
+              << std::endl;
+    std::cout << LOGGER::INFO
+              << "[SLAM][SDK2ROS] publish=/imu/data (sensor_msgs/Imu, source=lite3_sdk)"
+              << std::endl;
+
+    this->odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/Odometry", rclcpp::SystemDefaultsQoS(),
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->OdomCallback(msg); });
+
+    this->nav_goal_actual_map_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/nav/goal_actual_map", rclcpp::SystemDefaultsQoS());
+    this->nav_goal_pred_map_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/nav/goal_pred_map", rclcpp::SystemDefaultsQoS());
+    this->nav_goal_compare_markers_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+        "/nav/goal_compare_markers", rclcpp::SystemDefaultsQoS());
+    this->nav_goal_error_body_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+        "/nav/goal_error_body", rclcpp::SystemDefaultsQoS());
+
+    std::cout << LOGGER::INFO
+              << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body}"
               << std::endl;
 #endif
 
@@ -425,6 +468,9 @@ void RL_Real::RobotControl()
     {
         std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
         this->GetState(&this->robot_state);
+#if defined(USE_ROS2)
+        this->PublishSlamImuFromSdk(this->robot_state);
+#endif
         this->UpdateHighFrequencyObs();
     }
 
@@ -654,6 +700,41 @@ void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
 }
 
 #if defined(USE_ROS2)
+void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
+{
+    if (this->sdk_imu_publisher_ == nullptr || this->robot_data_ == nullptr)
+    {
+        return;
+    }
+
+    sensor_msgs::msg::Imu imu_msg;
+    imu_msg.header.stamp = this->get_clock()->now();
+    imu_msg.header.frame_id = "base_link";
+
+    imu_msg.orientation.w = state.imu.quaternion[0];
+    imu_msg.orientation.x = state.imu.quaternion[1];
+    imu_msg.orientation.y = state.imu.quaternion[2];
+    imu_msg.orientation.z = state.imu.quaternion[3];
+
+    imu_msg.angular_velocity.x = state.imu.gyroscope[0];
+    imu_msg.angular_velocity.y = state.imu.gyroscope[1];
+    imu_msg.angular_velocity.z = state.imu.gyroscope[2];
+
+    imu_msg.linear_acceleration.x = static_cast<double>(this->robot_data_->imu.acc_x);
+    imu_msg.linear_acceleration.y = static_cast<double>(this->robot_data_->imu.acc_y);
+    imu_msg.linear_acceleration.z = static_cast<double>(this->robot_data_->imu.acc_z);
+
+    this->sdk_imu_publisher_->publish(imu_msg);
+
+    if (this->sdk_imu_pub_started_ == false)
+    {
+        this->sdk_imu_pub_started_ = true;
+        std::cout << LOGGER::INFO
+                  << "[SLAM][SDK2ROS] first /imu/data published from Lite3 SDK"
+                  << std::endl;
+    }
+}
+
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     // Match 10Hz temporal spacing used by navigation policy (assuming 60Hz depth stream).
@@ -685,6 +766,235 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
 {
     this->SetNavGoalBody(msg->x, msg->y, msg->theta, "ros_topic");
+}
+
+void RL_Real::OdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+{
+    const auto &pose = msg->pose.pose;
+    const double yaw = QuaternionToYaw(pose.orientation);
+
+    std::lock_guard<std::mutex> lock(this->odom_pose_mutex_);
+    this->odom_map_x_ = pose.position.x;
+    this->odom_map_y_ = pose.position.y;
+    this->odom_map_yaw_ = yaw;
+    this->odom_stamp_ = msg->header.stamp;
+    this->odom_pose_received_ = true;
+}
+
+bool RL_Real::TryProjectBodyTargetToMap(
+    double body_x,
+    double body_y,
+    double body_yaw,
+    double base_x,
+    double base_y,
+    double base_yaw,
+    geometry_msgs::msg::PoseStamped *pose_out) const
+{
+    if (pose_out == nullptr)
+    {
+        return false;
+    }
+
+    const double c = std::cos(base_yaw);
+    const double s = std::sin(base_yaw);
+    pose_out->pose.position.x = base_x + c * body_x - s * body_y;
+    pose_out->pose.position.y = base_y + s * body_x + c * body_y;
+    pose_out->pose.position.z = 0.0;
+    pose_out->pose.orientation = YawToQuaternion(WrapToPi(base_yaw + body_yaw));
+    return true;
+}
+
+void RL_Real::PublishNavGoalComparison(
+    const torch::Tensor &pred_target_body,
+    uint64_t goal_seq,
+    bool new_goal)
+{
+    double base_x = 0.0;
+    double base_y = 0.0;
+    double base_yaw = 0.0;
+    rclcpp::Time base_stamp(0, 0, RCL_ROS_TIME);
+
+    {
+        std::lock_guard<std::mutex> lock(this->odom_pose_mutex_);
+        if (!this->odom_pose_received_)
+        {
+            static auto last_warn_tp = std::chrono::steady_clock::time_point{};
+            const auto now_tp = std::chrono::steady_clock::now();
+            if (last_warn_tp.time_since_epoch().count() == 0 ||
+                std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_warn_tp).count() >= 1)
+            {
+                std::cout << LOGGER::WARNING
+                          << "[NAV][COMPARE] waiting for /Odometry, skip map-frame target projection"
+                          << std::endl;
+                last_warn_tp = now_tp;
+            }
+            return;
+        }
+
+        base_x = this->odom_map_x_;
+        base_y = this->odom_map_y_;
+        base_yaw = this->odom_map_yaw_;
+        base_stamp = this->odom_stamp_;
+    }
+
+    if (new_goal || !this->nav_goal_actual_map_valid_ || this->nav_goal_actual_map_goal_seq_ != goal_seq)
+    {
+        geometry_msgs::msg::PoseStamped actual_pose;
+        if (!this->TryProjectBodyTargetToMap(
+                this->nav_goal_body_x_.load(),
+                this->nav_goal_body_y_.load(),
+                this->nav_goal_body_yaw_.load(),
+                base_x,
+                base_y,
+                base_yaw,
+                &actual_pose))
+        {
+            return;
+        }
+
+        actual_pose.header.frame_id = "map";
+        actual_pose.header.stamp = base_stamp;
+        this->nav_goal_actual_map_pose_ = actual_pose;
+        this->nav_goal_actual_map_valid_ = true;
+        this->nav_goal_actual_map_goal_seq_ = goal_seq;
+    }
+
+    if (!this->nav_goal_actual_map_valid_)
+    {
+        return;
+    }
+
+    this->nav_goal_actual_map_pose_.header.stamp = base_stamp;
+    this->nav_goal_actual_map_publisher_->publish(this->nav_goal_actual_map_pose_);
+
+    if (!pred_target_body.defined() || pred_target_body.numel() < 2)
+    {
+        static auto last_warn_tp = std::chrono::steady_clock::time_point{};
+        const auto now_tp = std::chrono::steady_clock::now();
+        if (last_warn_tp.time_since_epoch().count() == 0 ||
+            std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_warn_tp).count() >= 1)
+        {
+            std::cout << LOGGER::WARNING
+                      << "[NAV][COMPARE] pred_target_body unavailable, skip compare publish"
+                      << std::endl;
+            last_warn_tp = now_tp;
+        }
+        return;
+    }
+
+    torch::Tensor pred_flat;
+    try
+    {
+        pred_flat = pred_target_body.to(torch::kFloat32).view({-1});
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << LOGGER::WARNING << "[NAV][COMPARE] pred_target_body reshape failed: " << e.what() << std::endl;
+        return;
+    }
+
+    if (pred_flat.numel() < 2)
+    {
+        return;
+    }
+
+    const double pred_body_x = pred_flat[0].item<double>();
+    const double pred_body_y = pred_flat[1].item<double>();
+    const double pred_body_yaw = (pred_flat.numel() >= 3) ? pred_flat[2].item<double>() : 0.0;
+
+    geometry_msgs::msg::PoseStamped pred_pose;
+    if (!this->TryProjectBodyTargetToMap(
+            pred_body_x,
+            pred_body_y,
+            pred_body_yaw,
+            base_x,
+            base_y,
+            base_yaw,
+            &pred_pose))
+    {
+        return;
+    }
+    pred_pose.header.frame_id = "map";
+    pred_pose.header.stamp = base_stamp;
+    this->nav_goal_pred_map_publisher_->publish(pred_pose);
+
+    const double actual_map_yaw = QuaternionToYaw(this->nav_goal_actual_map_pose_.pose.orientation);
+    const double dx_map = this->nav_goal_actual_map_pose_.pose.position.x - base_x;
+    const double dy_map = this->nav_goal_actual_map_pose_.pose.position.y - base_y;
+    const double c = std::cos(base_yaw);
+    const double s = std::sin(base_yaw);
+    const double actual_body_x = c * dx_map + s * dy_map;
+    const double actual_body_y = -s * dx_map + c * dy_map;
+    const double actual_body_yaw = WrapToPi(actual_map_yaw - base_yaw);
+
+    geometry_msgs::msg::Vector3 error_body;
+    error_body.x = pred_body_x - actual_body_x;
+    error_body.y = pred_body_y - actual_body_y;
+    error_body.z = WrapToPi(pred_body_yaw - actual_body_yaw);
+    this->nav_goal_error_body_publisher_->publish(error_body);
+
+    visualization_msgs::msg::MarkerArray markers;
+
+    visualization_msgs::msg::Marker actual_marker;
+    actual_marker.header.frame_id = "map";
+    actual_marker.header.stamp = base_stamp;
+    actual_marker.ns = "nav_goal_compare";
+    actual_marker.id = 0;
+    actual_marker.type = visualization_msgs::msg::Marker::SPHERE;
+    actual_marker.action = visualization_msgs::msg::Marker::ADD;
+    actual_marker.pose = this->nav_goal_actual_map_pose_.pose;
+    actual_marker.scale.x = 0.25;
+    actual_marker.scale.y = 0.25;
+    actual_marker.scale.z = 0.25;
+    actual_marker.color.r = 0.0f;
+    actual_marker.color.g = 1.0f;
+    actual_marker.color.b = 0.0f;
+    actual_marker.color.a = 0.9f;
+    markers.markers.push_back(actual_marker);
+
+    visualization_msgs::msg::Marker pred_marker;
+    pred_marker.header.frame_id = "map";
+    pred_marker.header.stamp = base_stamp;
+    pred_marker.ns = "nav_goal_compare";
+    pred_marker.id = 1;
+    pred_marker.type = visualization_msgs::msg::Marker::SPHERE;
+    pred_marker.action = visualization_msgs::msg::Marker::ADD;
+    pred_marker.pose = pred_pose.pose;
+    pred_marker.scale.x = 0.22;
+    pred_marker.scale.y = 0.22;
+    pred_marker.scale.z = 0.22;
+    pred_marker.color.r = 1.0f;
+    pred_marker.color.g = 0.5f;
+    pred_marker.color.b = 0.0f;
+    pred_marker.color.a = 0.9f;
+    markers.markers.push_back(pred_marker);
+
+    visualization_msgs::msg::Marker line_marker;
+    line_marker.header.frame_id = "map";
+    line_marker.header.stamp = base_stamp;
+    line_marker.ns = "nav_goal_compare";
+    line_marker.id = 2;
+    line_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    line_marker.action = visualization_msgs::msg::Marker::ADD;
+    line_marker.scale.x = 0.06;
+    line_marker.color.r = 1.0f;
+    line_marker.color.g = 1.0f;
+    line_marker.color.b = 1.0f;
+    line_marker.color.a = 0.9f;
+
+    geometry_msgs::msg::Point p_actual;
+    p_actual.x = this->nav_goal_actual_map_pose_.pose.position.x;
+    p_actual.y = this->nav_goal_actual_map_pose_.pose.position.y;
+    p_actual.z = 0.05;
+    geometry_msgs::msg::Point p_pred;
+    p_pred.x = pred_pose.pose.position.x;
+    p_pred.y = pred_pose.pose.position.y;
+    p_pred.z = 0.05;
+    line_marker.points.push_back(p_actual);
+    line_marker.points.push_back(p_pred);
+    markers.markers.push_back(line_marker);
+
+    this->nav_goal_compare_markers_publisher_->publish(markers);
 }
 #endif
 
@@ -1145,6 +1455,10 @@ void RL_Real::RunHighLevel()
             std::cout << LOGGER::INFO << "NavPred body:[" << tx << ", " << ty << ", " << tyaw << "]" << std::endl;
         }
     }
+
+#if defined(USE_ROS2)
+    this->PublishNavGoalComparison(pred_target_body, goal_seq, new_goal);
+#endif
 
     this->nav_cmd_x_.store(cmd[0][0].item<double>());
     this->nav_cmd_y_.store(cmd[0][1].item<double>());
