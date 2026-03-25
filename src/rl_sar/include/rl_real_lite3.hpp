@@ -134,6 +134,9 @@ private:
     double nav_episode_length_s_ = 30;  // default if not specified
     double nav_clip_lin_ = 1.0;         // clip for cmd x/y
     double nav_clip_ang_ = 1.0;         // clip for cmd yaw
+    int nav_watchdog_timeout_ms_ = 1200; // stale high-level heartbeat timeout
+    bool nav_perf_log_enable_ = false;   // 1Hz-ish high-level perf stats
+    double nav_perf_log_interval_s_ = 1.0;
 
     std::mutex nav_highfreq_mutex_;
     std::mutex nav_state_mutex_;

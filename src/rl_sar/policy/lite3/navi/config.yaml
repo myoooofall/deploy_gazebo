@@ -9,6 +9,9 @@ lite3/navi:
   nav_episode_length_s: 45.0
   clip_commands_lin: 1.0
   clip_commands_ang: 1.0
+  watchdog_timeout_ms: 3000
+  perf_log_enable: true
+  perf_log_interval_s: 1.0
   vision_channels: 8
   momentum_factor: 0.95
   num_observations: 45

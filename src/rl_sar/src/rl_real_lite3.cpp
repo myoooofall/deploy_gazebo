@@ -446,11 +446,14 @@ void RL_Real::RobotControl()
 
         // Only watchdog in RL running stage. During GetUp/GetDown/Passive, rl_init_done=false
         // and high-level heartbeat is expected to stop.
-        const bool can_watchdog = this->rl_init_done && beat_seq > 0;
+        // Require at least 2 high-level beats before watchdog is armed.
+        // The first beat after a new goal can be noticeably slower (cold start),
+        // and should not be treated as a stale-command fault.
+        const bool can_watchdog = this->rl_init_done && beat_seq >= 2;
         if (can_watchdog && last_nav_hl_beat_tp.time_since_epoch().count() != 0)
         {
             const auto now_tp = SteadyClock::now();
-            constexpr int64_t kMaxNoBeatMs = 1200; // allow occasional slow inference without false alarm
+            const int64_t kMaxNoBeatMs = static_cast<int64_t>(this->nav_watchdog_timeout_ms_);
             const int64_t no_beat_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - last_nav_hl_beat_tp).count();
             if (no_beat_ms > kMaxNoBeatMs)
             {
@@ -922,20 +925,7 @@ void RL_Real::PublishNavGoalComparison(
     bool has_odom = false;
     {
         std::lock_guard<std::mutex> lock(this->odom_pose_mutex_);
-        if (!this->odom_pose_received_)
-        {
-            static auto last_warn_tp = std::chrono::steady_clock::time_point{};
-            const auto now_tp = std::chrono::steady_clock::now();
-            if (last_warn_tp.time_since_epoch().count() == 0 ||
-                std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_warn_tp).count() >= 1)
-            {
-                std::cout << LOGGER::WARNING
-                          << "[NAV][COMPARE] /Odometry unavailable, publish body-frame goals on existing goal topics"
-                          << std::endl;
-                last_warn_tp = now_tp;
-            }
-        }
-        else
+        if (this->odom_pose_received_)
         {
             has_odom = true;
             base_x = this->odom_map_x_;
@@ -1204,6 +1194,20 @@ bool RL_Real::InitHierarchicalNav()
         const int channels = config["vision_channels"].as<int>();
         this->nav_vision_channels_ = (channels > 0) ? channels : 1;
     }
+    if (config["watchdog_timeout_ms"])
+    {
+        const int timeout_ms = config["watchdog_timeout_ms"].as<int>();
+        this->nav_watchdog_timeout_ms_ = (timeout_ms > 0) ? timeout_ms : 1200;
+    }
+    if (config["perf_log_enable"])
+    {
+        this->nav_perf_log_enable_ = config["perf_log_enable"].as<bool>();
+    }
+    if (config["perf_log_interval_s"])
+    {
+        const double interval_s = config["perf_log_interval_s"].as<double>();
+        this->nav_perf_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
+    }
     if (this->nav_vision_channels_ < 1)
     {
         this->nav_vision_channels_ = 1;
@@ -1216,6 +1220,9 @@ bool RL_Real::InitHierarchicalNav()
               << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
               << ", clip_lin=" << this->nav_clip_lin_
               << ", clip_ang=" << this->nav_clip_ang_
+              << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
+              << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
+              << ", perf_log_interval_s=" << this->nav_perf_log_interval_s_
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
@@ -1283,6 +1290,15 @@ void RL_Real::UpdateHighFrequencyObs()
 
 void RL_Real::RunHighLevel()
 {
+    using SteadyClock = std::chrono::steady_clock;
+    static bool perf_inited = false;
+    static SteadyClock::time_point perf_last_report_tp;
+    static double perf_sum_vision_ms = 0.0;
+    static double perf_sum_high_ms = 0.0;
+    static double perf_max_vision_ms = 0.0;
+    static double perf_max_high_ms = 0.0;
+    static uint64_t perf_samples = 0;
+
     if (!this->nav_enabled_.load())
     {
         return;
@@ -1457,6 +1473,7 @@ void RL_Real::RunHighLevel()
     }
 
     torch::Tensor vision_feat;
+    const auto vision_begin_tp = SteadyClock::now();
     if (!g_depth_frame_received.load())
     {
         this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/depth/image_rect_raw");
@@ -1483,11 +1500,14 @@ void RL_Real::RunHighLevel()
         this->DisableNavigationWithError("vision_input", oss.str());
     }
     vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+    const double vision_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - vision_begin_tp).count();
 
     torch::Tensor cmd;
     torch::Tensor pred_target_body;
+    const auto high_begin_tp = SteadyClock::now();
     std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
     torch::jit::IValue out = this->nav_high_model_.forward(inputs);
+    const double high_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - high_begin_tp).count();
     if (out.isTensor())
     {
         cmd = out.toTensor();
@@ -1520,6 +1540,41 @@ void RL_Real::RunHighLevel()
     if (!cmd.defined() || cmd.numel() < 3)
     {
         this->DisableNavigationWithError("output_validate", "invalid high-level output: command tensor missing or too short");
+    }
+
+    if (this->nav_perf_log_enable_)
+    {
+        if (!perf_inited)
+        {
+            perf_last_report_tp = SteadyClock::now();
+            perf_inited = true;
+        }
+        perf_sum_vision_ms += vision_ms;
+        perf_sum_high_ms += high_ms;
+        perf_max_vision_ms = std::max(perf_max_vision_ms, vision_ms);
+        perf_max_high_ms = std::max(perf_max_high_ms, high_ms);
+        perf_samples += 1;
+
+        const auto now_tp = SteadyClock::now();
+        if (std::chrono::duration<double>(now_tp - perf_last_report_tp).count() >= this->nav_perf_log_interval_s_ &&
+            perf_samples > 0)
+        {
+            const double avg_vision_ms = perf_sum_vision_ms / static_cast<double>(perf_samples);
+            const double avg_high_ms = perf_sum_high_ms / static_cast<double>(perf_samples);
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2)
+                << "[NAV][PERF] samples=" << perf_samples
+                << " vision_ms(avg/max)=[" << avg_vision_ms << "/" << perf_max_vision_ms << "]"
+                << " high_ms(avg/max)=[" << avg_high_ms << "/" << perf_max_high_ms << "]";
+            std::cout << LOGGER::INFO << oss.str() << std::endl;
+
+            perf_sum_vision_ms = 0.0;
+            perf_sum_high_ms = 0.0;
+            perf_max_vision_ms = 0.0;
+            perf_max_high_ms = 0.0;
+            perf_samples = 0;
+            perf_last_report_tp = now_tp;
+        }
     }
 
     const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
