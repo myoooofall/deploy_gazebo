@@ -105,12 +105,10 @@ private:
     void UpdateHighFrequencyObs();
     void StartNavGoalInput();
     void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
-    void DisableNavigationWithError(const std::string &stage, const std::string &detail);
+    [[noreturn]] void DisableNavigationWithError(const std::string &stage, const std::string &detail);
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};
-    std::atomic<bool> nav_models_loaded_{false};
-    std::atomic<bool> nav_has_goal_{false};
     std::atomic<uint64_t> nav_goal_seq_{0};
 
     std::atomic<double> nav_goal_body_x_{0.0};
@@ -121,8 +119,6 @@ private:
     std::atomic<double> nav_cmd_y_{0.0};
     std::atomic<double> nav_cmd_yaw_{0.0};
     std::atomic<bool> nav_goal_input_active_{false};
-    std::atomic<bool> nav_enable_request_{false};
-
     // buffers and models (guarded as needed)
     torch::jit::script::Module nav_high_model_;
     torch::jit::script::Module nav_vision_model_;

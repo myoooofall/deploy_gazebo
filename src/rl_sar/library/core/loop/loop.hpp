@@ -16,6 +16,7 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <exception>
 
 class LoopFunc
 {
@@ -69,7 +70,20 @@ private:
         {
             auto start = std::chrono::steady_clock::now();
 
-            _func();
+            try
+            {
+                _func();
+            }
+            catch (const std::exception &e)
+            {
+                log("[Loop Fatal] named: " + _name + ", exception: " + e.what());
+                std::terminate();
+            }
+            catch (...)
+            {
+                log("[Loop Fatal] named: " + _name + ", unknown exception");
+                std::terminate();
+            }
 
             auto end = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

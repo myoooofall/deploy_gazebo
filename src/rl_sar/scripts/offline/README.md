@@ -9,19 +9,49 @@ cd ~/liangwang_ws/rl_sar_new/rl_sar/src/rl_sar/scripts/offline
 ./record_lite3_raw_bag.sh run_maze_01
 ```
 
+Use `--lite` to reduce bag size (skip depth topics):
+
+```bash
+./record_lite3_raw_bag.sh --lite run_maze_01
+```
+
+Use `--full` for full recording (default):
+
+```bash
+./record_lite3_raw_bag.sh --full run_maze_01
+```
+
 Default output:
 - `$HOME/bags/lite3/raw/run_maze_01`
 
-Recorded topics include:
+`--full` recorded topics include:
 - `/rslidar_points`, `/imu/data`, `/tf`, `/tf_static`
 - `/Odometry` (if available)
 - `/nav/goal_actual_map`, `/nav/goal_pred_map`, `/nav/goal_error_body`, `/nav_goal_body`
 - `/camera/depth/processed`, `/camera/depth/processed_norm`
 
-## 2) Copy bag to host
+`--lite` excludes:
+- `/camera/depth/processed`, `/camera/depth/processed_norm`
+
+## 2) NX push bag to Mac
+
+Option A: direct rsync command from NX
 
 ```bash
-rsync -avP <nx_user>@<nx_ip>:~/bags/lite3/raw/run_maze_01 ~/bags/lite3/raw/
+rsync -avP ~/bags/lite3/raw/run_maze_01 <mac_user>@<mac_ip>:~/bags/lite3/raw/
+```
+
+Option B: helper script (run on NX)
+
+```bash
+cd ~/liangwang_ws/rl_sar_new/rl_sar/src/rl_sar/scripts/offline
+MAC_USER=<your_mac_user> MAC_HOST=<your_mac_ip> ./pull_bag_from_nx.sh run_maze_01
+```
+
+You can also override destination path:
+
+```bash
+MAC_USER=<your_mac_user> MAC_HOST=<your_mac_ip> MAC_BASE_DIR=~/bags/lite3/raw ./pull_bag_from_nx.sh run_maze_01
 ```
 
 ## 3) Host: replay raw bag + run localization + record enriched bag

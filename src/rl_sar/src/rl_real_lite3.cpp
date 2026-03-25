@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 static std::atomic<bool> g_depth_frame_received{false};
@@ -139,7 +140,7 @@ RL_Real::RL_Real()
               << std::endl;
 #endif
 
-    // init hierarchical nav policy (best-effort; safe to fail)
+    // init hierarchical nav policy (required)
     this->InitHierarchicalNav();
 
     // loop
@@ -330,28 +331,22 @@ void RL_Real::SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, cons
     this->nav_goal_body_x_.store(goal_x);
     this->nav_goal_body_y_.store(goal_y);
     this->nav_goal_body_yaw_.store(yaw_wrapped);
-    this->nav_has_goal_.store(true);
     this->nav_goal_seq_.fetch_add(1);
-    this->nav_enable_request_.store(true);
+    this->nav_enabled_.store(true);
 
     std::cout << LOGGER::INFO
               << "NavGoalBody(" << (source ? source : "unknown") << "): x=" << goal_x
               << " y=" << goal_y << " yaw=" << yaw_wrapped << std::endl;
 }
 
-void RL_Real::DisableNavigationWithError(const std::string &stage, const std::string &detail)
+[[noreturn]] void RL_Real::DisableNavigationWithError(const std::string &stage, const std::string &detail)
 {
-    this->nav_enabled_.store(false);
-    this->nav_enable_request_.store(false);
-    this->control.navigation_mode = false;
-    this->nav_cmd_x_.store(0.0);
-    this->nav_cmd_y_.store(0.0);
-    this->nav_cmd_yaw_.store(0.0);
-    this->nav_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
-
-    std::cout << LOGGER::ERROR
-              << "[NAV] Disabled due to " << stage << " error: " << detail
-              << std::endl;
+    const std::string msg = "[NAV][FATAL] " + stage + ": " + detail;
+#if defined(USE_ROS2)
+    RCLCPP_ERROR(this->get_logger(), "%s", msg.c_str());
+#endif
+    std::cout << LOGGER::ERROR << msg << std::endl;
+    throw std::runtime_error(msg);
 }
 
 void RL_Real::StartNavGoalInput()
@@ -406,14 +401,7 @@ void RL_Real::RobotControl()
 {
     this->motiontime++;
 
-    if (this->nav_enable_request_.exchange(false))
-    {
-        this->control.navigation_mode = true;
-        this->nav_enabled_.store(true);
-        std::cout << LOGGER::INFO << "Navigation mode: ON (goal latched)" << std::endl;
-    }
-
-    if (this->nav_enabled_.load() && this->nav_models_loaded_.load())
+    if (this->nav_enabled_.load())
     {
         this->control.x = this->nav_cmd_x_.load();
         this->control.y = this->nav_cmd_y_.load();
@@ -461,9 +449,23 @@ void RL_Real::RobotControl()
     }
     if (this->control.current_keyboard == Input::Keyboard::N || this->control.current_gamepad == Input::Gamepad::X)
     {
-        this->control.navigation_mode = !this->control.navigation_mode;
-        this->nav_enabled_.store(this->control.navigation_mode);
-        std::cout << std::endl << LOGGER::INFO << "Navigation mode: " << (this->control.navigation_mode ? "ON" : "OFF") << std::endl;
+        const bool next_enabled = !this->nav_enabled_.load();
+        this->nav_enabled_.store(next_enabled);
+        if (!next_enabled)
+        {
+            // Stop immediately when leaving navigation mode.
+            this->control.x = 0.0;
+            this->control.y = 0.0;
+            this->control.yaw = 0.0;
+            this->nav_cmd_x_.store(0.0);
+            this->nav_cmd_y_.store(0.0);
+            this->nav_cmd_yaw_.store(0.0);
+            if (this->nav_high_command_.defined())
+            {
+                this->nav_high_command_.zero_();
+            }
+        }
+        std::cout << std::endl << LOGGER::INFO << "Navigation mode: " << (next_enabled ? "ON" : "OFF") << std::endl;
         this->control.current_keyboard = this->control.last_keyboard;
     }
 
@@ -881,15 +883,7 @@ void RL_Real::PublishNavGoalComparison(
             return;
         }
 
-        torch::Tensor pred_flat;
-        try
-        {
-            pred_flat = pred_target_body.to(torch::kFloat32).view({-1});
-        }
-        catch (const std::exception &)
-        {
-            return;
-        }
+        torch::Tensor pred_flat = pred_target_body.to(torch::kFloat32).view({-1});
 
         if (pred_flat.numel() < 2)
         {
@@ -967,16 +961,7 @@ void RL_Real::PublishNavGoalComparison(
         return;
     }
 
-    torch::Tensor pred_flat;
-    try
-    {
-        pred_flat = pred_target_body.to(torch::kFloat32).view({-1});
-    }
-    catch (const std::exception &e)
-    {
-        std::cout << LOGGER::WARNING << "[NAV][COMPARE] pred_target_body reshape failed: " << e.what() << std::endl;
-        return;
-    }
+    torch::Tensor pred_flat = pred_target_body.to(torch::kFloat32).view({-1});
 
     if (pred_flat.numel() < 2)
     {
@@ -1089,38 +1074,22 @@ bool RL_Real::InitHierarchicalNav()
     const std::string nav_dir = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/policy/" + robot + "/navi";
     this->nav_config_path_ = nav_dir + "/config.yaml";
 
-    YAML::Node config;
-    try
-    {
-        config = YAML::LoadFile(this->nav_config_path_)[robot + "/navi"];
-    }
-    catch (const YAML::BadFile &)
-    {
-        std::cout << LOGGER::WARNING << "Nav config not found: " << this->nav_config_path_ << std::endl;
-        this->nav_models_loaded_.store(false);
-        return false;
-    }
-    catch (const YAML::Exception &e)
-    {
-        std::cout << LOGGER::WARNING << "Failed to parse nav config " << this->nav_config_path_ << ": " << e.what() << std::endl;
-        this->nav_models_loaded_.store(false);
-        return false;
-    }
+    YAML::Node config = YAML::LoadFile(this->nav_config_path_)[robot + "/navi"];
 
     if (!config)
     {
-        std::cout << LOGGER::WARNING << "Nav config missing key '" << robot << "/navi' in " << this->nav_config_path_ << std::endl;
-        this->nav_models_loaded_.store(false);
-        return false;
+        std::ostringstream oss;
+        oss << "Nav config missing key '" << robot << "/navi' in " << this->nav_config_path_;
+        throw std::runtime_error(oss.str());
     }
 
     const std::string high_name = config["high_model_name"] ? config["high_model_name"].as<std::string>() : "";
     const std::string vision_name = config["vision_model_name"] ? config["vision_model_name"].as<std::string>() : "";
     if (high_name.empty() || vision_name.empty())
     {
-        std::cout << LOGGER::WARNING << "Nav config must contain 'high_model_name' and 'vision_model_name' in " << this->nav_config_path_ << std::endl;
-        this->nav_models_loaded_.store(false);
-        return false;
+        std::ostringstream oss;
+        oss << "Nav config must contain 'high_model_name' and 'vision_model_name' in " << this->nav_config_path_;
+        throw std::runtime_error(oss.str());
     }
 
     // optional params (safe defaults)
@@ -1168,28 +1137,10 @@ bool RL_Real::InitHierarchicalNav()
     this->nav_high_model_path_ = nav_dir + "/" + high_name;
     this->nav_vision_model_path_ = nav_dir + "/" + vision_name;
 
-    try
-    {
-        this->nav_high_model_ = torch::jit::load(this->nav_high_model_path_);
-        this->nav_vision_model_ = torch::jit::load(this->nav_vision_model_path_);
-        this->nav_high_model_.eval();
-        this->nav_vision_model_.eval();
-    }
-    catch (const c10::Error &e)
-    {
-        std::cout << LOGGER::WARNING << "Failed to load nav models: " << e.what() << std::endl;
-        this->nav_models_loaded_.store(false);
-        return false;
-    }
-
-    try
-    {
-        std::cout << LOGGER::INFO << "Nav high forward schema: " << this->nav_high_model_.get_method("forward").function().getSchema() << std::endl;
-        std::cout << LOGGER::INFO << "Nav vision forward schema: " << this->nav_vision_model_.get_method("forward").function().getSchema() << std::endl;
-    }
-    catch (...)
-    {
-    }
+    this->nav_high_model_ = torch::jit::load(this->nav_high_model_path_);
+    this->nav_vision_model_ = torch::jit::load(this->nav_vision_model_path_);
+    this->nav_high_model_.eval();
+    this->nav_vision_model_.eval();
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
@@ -1206,17 +1157,11 @@ bool RL_Real::InitHierarchicalNav()
     this->nav_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
     this->nav_last_actions_ = std::vector<float>(dof, 0.0f);
 
-    this->nav_models_loaded_.store(true);
     return true;
 }
 
 void RL_Real::UpdateHighFrequencyObs()
 {
-    if (!this->nav_models_loaded_.load())
-    {
-        return;
-    }
-
     const double t = this->nav_time_io_hf_.load() + this->params.dt;
     this->nav_time_io_hf_.store(t);
 
@@ -1250,16 +1195,20 @@ void RL_Real::UpdateHighFrequencyObs()
 
 void RL_Real::RunHighLevel()
 {
-    if (!this->nav_models_loaded_.load() || !this->nav_enabled_.load())
+    if (!this->nav_enabled_.load())
     {
         return;
     }
-    if (!this->nav_has_goal_.load() || !this->rl_init_done)
+    if (!this->rl_init_done)
     {
         return;
     }
 
     const uint64_t goal_seq = this->nav_goal_seq_.load();
+    if (goal_seq == 0)
+    {
+        return;
+    }
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
 
     const double goal_body_x_initial = this->nav_goal_body_x_.load();
@@ -1388,125 +1337,69 @@ void RL_Real::RunHighLevel()
     }
 
     torch::Tensor vision_feat;
-    try
+    if (!g_depth_frame_received.load())
     {
-        if (!g_depth_frame_received.load())
-        {
-            this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/depth/image_rect_raw");
-            return;
-        }
-        torch::Tensor depth = depth_buffer.get_depth_vec();
-        if (!depth.defined())
-        {
-            this->DisableNavigationWithError("vision_input", "depth tensor is undefined");
-            return;
-        }
-        depth = depth.to(torch::kFloat32);
-        if (depth.dim() != 4)
-        {
-            std::ostringstream oss;
-            oss << "depth tensor rank mismatch, expected 4D [B,C,H,W], got dim=" << depth.dim();
-            this->DisableNavigationWithError("vision_input", oss.str());
-            return;
-        }
-        const int64_t channels = depth.size(1);
-        if (channels != static_cast<int64_t>(this->nav_vision_channels_))
-        {
-            std::ostringstream oss;
-            oss << "depth channels mismatch, expected " << this->nav_vision_channels_
-                << ", got " << channels
-                << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
-            this->DisableNavigationWithError("vision_input", oss.str());
-            return;
-        }
-        vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+        this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/depth/image_rect_raw");
     }
-    catch (const c10::Error &e)
+    torch::Tensor depth = depth_buffer.get_depth_vec();
+    if (!depth.defined())
     {
-        this->DisableNavigationWithError("vision_forward", e.what());
-        return;
+        this->DisableNavigationWithError("vision_input", "depth tensor is undefined");
     }
-    catch (const std::exception &e)
+    depth = depth.to(torch::kFloat32);
+    if (depth.dim() != 4)
     {
-        this->DisableNavigationWithError("vision_forward", e.what());
-        return;
+        std::ostringstream oss;
+        oss << "depth tensor rank mismatch, expected 4D [B,C,H,W], got dim=" << depth.dim();
+        this->DisableNavigationWithError("vision_input", oss.str());
     }
-    catch (...)
+    const int64_t channels = depth.size(1);
+    if (channels != static_cast<int64_t>(this->nav_vision_channels_))
     {
-        this->DisableNavigationWithError("vision_forward", "unknown exception");
-        return;
+        std::ostringstream oss;
+        oss << "depth channels mismatch, expected " << this->nav_vision_channels_
+            << ", got " << channels
+            << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
+        this->DisableNavigationWithError("vision_input", oss.str());
     }
+    vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
 
     torch::Tensor cmd;
     torch::Tensor pred_target_body;
-    torch::jit::IValue out;
-    try
+    std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
+    torch::jit::IValue out = this->nav_high_model_.forward(inputs);
+    if (out.isTensor())
     {
-        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
-        out = this->nav_high_model_.forward(inputs);
+        cmd = out.toTensor();
     }
-    catch (const c10::Error &e)
+    else if (out.isTuple())
     {
-        this->DisableNavigationWithError("high_forward", e.what());
-        return;
-    }
-    catch (const std::exception &e)
-    {
-        this->DisableNavigationWithError("high_forward", e.what());
-        return;
-    }
-    catch (...)
-    {
-        this->DisableNavigationWithError("high_forward", "unknown exception");
-        return;
-    }
-
-    try
-    {
-        if (out.isTensor())
+        auto elems = out.toTuple()->elements();
+        if (!elems.empty() && elems[0].isTensor())
         {
-            cmd = out.toTensor();
+            cmd = elems[0].toTensor();
         }
-        else if (out.isTuple())
+        if (elems.size() > 2 && elems[2].isTensor())
         {
-            auto elems = out.toTuple()->elements();
-            if (!elems.empty() && elems[0].isTensor())
-            {
-                cmd = elems[0].toTensor();
-            }
-            if (elems.size() > 2 && elems[2].isTensor())
-            {
-                pred_target_body = elems[2].toTensor();
-            }
-        }
-        else if (out.isList())
-        {
-            auto list = out.toList();
-            if (list.size() > 0 && list.get(0).isTensor())
-            {
-                cmd = list.get(0).toTensor();
-            }
-            if (list.size() > 2 && list.get(2).isTensor())
-            {
-                pred_target_body = list.get(2).toTensor();
-            }
+            pred_target_body = elems[2].toTensor();
         }
     }
-    catch (const std::exception &e)
+    else if (out.isList())
     {
-        this->DisableNavigationWithError("output_unpack", e.what());
-        return;
-    }
-    catch (...)
-    {
-        this->DisableNavigationWithError("output_unpack", "unknown exception");
-        return;
+        auto list = out.toList();
+        if (list.size() > 0 && list.get(0).isTensor())
+        {
+            cmd = list.get(0).toTensor();
+        }
+        if (list.size() > 2 && list.get(2).isTensor())
+        {
+            pred_target_body = list.get(2).toTensor();
+        }
     }
 
     if (!cmd.defined() || cmd.numel() < 3)
     {
         this->DisableNavigationWithError("output_validate", "invalid high-level output: command tensor missing or too short");
-        return;
     }
 
     const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
@@ -1517,28 +1410,44 @@ void RL_Real::RunHighLevel()
     const torch::Tensor clip_low = -clip_high;
     cmd = torch::max(torch::min(cmd_raw, clip_high), clip_low);
 
-    static int dbg_tick = 0;
-    dbg_tick = (dbg_tick + 1) % 10;
-    if (dbg_tick == 0 || new_goal)
+    static auto last_nav_run_log_tp = std::chrono::steady_clock::time_point{};
+    const auto now_tp = std::chrono::steady_clock::now();
+    const bool due_log = (last_nav_run_log_tp.time_since_epoch().count() == 0) ||
+                         (std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_nav_run_log_tp).count() >= 1);
+    if (new_goal || due_log)
     {
-        std::cout << LOGGER::INFO
-                  << "NavHigh raw:[" << cmd_raw[0][0].item<double>() << ", " << cmd_raw[0][1].item<double>() << ", " << cmd_raw[0][2].item<double>() << "]"
-                  << " clipped:[" << cmd[0][0].item<double>() << ", " << cmd[0][1].item<double>() << ", " << cmd[0][2].item<double>() << "]"
-                  << " goal_body_initial:[" << this->nav_position_targets_body_initial_[0][0].item<double>() << ", "
-                  << this->nav_position_targets_body_initial_[0][1].item<double>() << ", "
-                  << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
-                  << std::endl;
-    }
-
-    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
-    {
-        const double tx = pred_target_body[0][0].item<double>();
-        const double ty = pred_target_body[0][1].item<double>();
-        const double tyaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
-        if (dbg_tick == 0 || new_goal)
+        double pred_x = std::numeric_limits<double>::quiet_NaN();
+        double pred_y = std::numeric_limits<double>::quiet_NaN();
+        double pred_yaw = std::numeric_limits<double>::quiet_NaN();
+        bool has_pred = false;
+        if (pred_target_body.defined() && pred_target_body.numel() >= 2)
         {
-            std::cout << LOGGER::INFO << "NavPred body:[" << tx << ", " << ty << ", " << tyaw << "]" << std::endl;
+            has_pred = true;
+            pred_x = pred_target_body[0][0].item<double>();
+            pred_y = pred_target_body[0][1].item<double>();
+            pred_yaw = (pred_target_body.numel() >= 3) ? pred_target_body[0][2].item<double>() : 0.0;
         }
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2)
+            << "[NAV][RUN] mode=ON"
+            << " goal_init:[" << this->nav_position_targets_body_initial_[0][0].item<double>() << ", "
+            << this->nav_position_targets_body_initial_[0][1].item<double>() << ", "
+            << this->nav_position_targets_body_initial_[0][2].item<double>() << "]"
+            << " pred_body:";
+        if (has_pred)
+        {
+            oss << "[" << pred_x << ", " << pred_y << ", " << pred_yaw << "]";
+        }
+        else
+        {
+            oss << "[NA]";
+        }
+        oss << " cmd:[" << cmd[0][0].item<double>() << ", "
+            << cmd[0][1].item<double>() << ", "
+            << cmd[0][2].item<double>() << "]";
+        std::cout << LOGGER::INFO << oss.str() << std::endl;
+        last_nav_run_log_tp = now_tp;
     }
 
 #if defined(USE_ROS2)
