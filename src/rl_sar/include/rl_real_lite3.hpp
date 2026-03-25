@@ -178,6 +178,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_pred_map_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr nav_goal_compare_markers_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr nav_goal_error_body_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr nav_cmd_high_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr nav_cmd_applied_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr sdk_imu_publisher_;
     bool sdk_imu_pub_started_ = false;
 

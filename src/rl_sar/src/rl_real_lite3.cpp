@@ -9,8 +9,24 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <torch/csrc/jit/passes/graph_fuser.h>
+#include <torch/csrc/jit/passes/tensorexpr_fuser.h>
+#include <torch/csrc/jit/python/update_graph_executor_opt.h>
 
 static std::atomic<bool> g_depth_frame_received{false};
+
+static void ConfigureTorchJitForRealtime()
+{
+    static std::once_flag once;
+    std::call_once(once, []() {
+        torch::jit::setGraphExecutorOptimize(false);
+        torch::jit::setTensorExprFuserEnabled(false);
+        torch::jit::overrideCanFuseOnCPULegacy(false);
+        std::cout << LOGGER::INFO
+                  << "[NAV][TORCH] disabled JIT graph optimize + tensor fuser (stability mode)"
+                  << std::endl;
+    });
+}
 
 static double WrapToPi(double a)
 {
@@ -76,6 +92,7 @@ RL_Real::RL_Real()
     // init torch
     torch::autograd::GradMode::set_enabled(false);
     torch::set_num_threads(4);
+    ConfigureTorchJitForRealtime();
 
 
     // Network init
@@ -134,9 +151,13 @@ RL_Real::RL_Real()
         "/nav/goal_compare_markers", rclcpp::SystemDefaultsQoS());
     this->nav_goal_error_body_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3>(
         "/nav/goal_error_body", rclcpp::SystemDefaultsQoS());
+    this->nav_cmd_high_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+        "/nav/cmd_high", rclcpp::SystemDefaultsQoS());
+    this->nav_cmd_applied_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+        "/nav/cmd_applied", rclcpp::SystemDefaultsQoS());
 
     std::cout << LOGGER::INFO
-              << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body} (fallback: body-frame on same goal topics when /Odometry is absent)"
+              << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body,/nav/cmd_high,/nav/cmd_applied} (fallback: body-frame on same goal topics when /Odometry is absent)"
               << std::endl;
 #endif
 
@@ -400,15 +421,59 @@ void RL_Real::StartNavGoalInput()
 void RL_Real::RobotControl()
 {
     this->motiontime++;
+    using SteadyClock = std::chrono::steady_clock;
+    static double last_nav_time_io = -1.0;
+    static int stale_nav_ticks = 0;
+    static SteadyClock::time_point last_stale_warn_tp{};
 
     if (this->nav_enabled_.load())
     {
         this->control.x = this->nav_cmd_x_.load();
         this->control.y = this->nav_cmd_y_.load();
         this->control.yaw = this->nav_cmd_yaw_.load();
+
+        // Safety watchdog: if high-level thread stops advancing nav_time_io_
+        // while navigation is ON, clear stale commands instead of reusing last cmd.
+        const double nav_time_io_now = this->nav_time_io_.load();
+        if (std::fabs(nav_time_io_now - last_nav_time_io) <= 1e-9)
+        {
+            ++stale_nav_ticks;
+        }
+        else
+        {
+            stale_nav_ticks = 0;
+            last_nav_time_io = nav_time_io_now;
+        }
+
+        constexpr int kMaxStaleControlTicks = 60; // ~0.3s at 200Hz control loop
+        if (stale_nav_ticks > kMaxStaleControlTicks)
+        {
+            this->control.x = 0.0;
+            this->control.y = 0.0;
+            this->control.yaw = 0.0;
+            this->nav_cmd_x_.store(0.0);
+            this->nav_cmd_y_.store(0.0);
+            this->nav_cmd_yaw_.store(0.0);
+            if (this->nav_high_command_.defined())
+            {
+                this->nav_high_command_.zero_();
+            }
+
+            const auto now_tp = SteadyClock::now();
+            if (last_stale_warn_tp.time_since_epoch().count() == 0 ||
+                std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_stale_warn_tp).count() >= 1)
+            {
+                std::cout << LOGGER::WARNING
+                          << "[NAV][SAFE] high-level heartbeat stale, command cleared"
+                          << std::endl;
+                last_stale_warn_tp = now_tp;
+            }
+        }
     }
     else
     {
+        stale_nav_ticks = 0;
+        last_nav_time_io = this->nav_time_io_.load();
         if (this->control.current_keyboard == Input::Keyboard::W)
         {
             this->control.x += 0.1;
@@ -483,6 +548,22 @@ void RL_Real::RobotControl()
     this->control.x = std::max(-this->params.cmd_clip_x, std::min(this->params.cmd_clip_x, this->control.x));
     this->control.y = std::max(-this->params.cmd_clip_y, std::min(this->params.cmd_clip_y, this->control.y));
     this->control.yaw = std::max(-this->params.cmd_clip_yaw, std::min(this->params.cmd_clip_yaw, this->control.yaw));
+#if defined(USE_ROS2)
+    // Debug output: command actually fed to low-level policy/control.
+    static int cmd_applied_pub_decim = 0;
+    if (++cmd_applied_pub_decim >= 20)
+    {
+        cmd_applied_pub_decim = 0;
+        if (this->nav_cmd_applied_publisher_)
+        {
+            geometry_msgs::msg::Vector3 msg;
+            msg.x = this->control.x;
+            msg.y = this->control.y;
+            msg.z = this->control.yaw;
+            this->nav_cmd_applied_publisher_->publish(msg);
+        }
+    }
+#endif
 
     this->StateController(&this->robot_state, &this->robot_command);
     this->SetCommand(&this->robot_command);
@@ -1199,14 +1280,42 @@ void RL_Real::RunHighLevel()
     {
         return;
     }
+    static auto last_gate_log_tp = std::chrono::steady_clock::time_point{};
+    const auto maybe_log_gate = [this](const char *reason, uint64_t goal_seq_now) {
+        const auto now_tp = std::chrono::steady_clock::now();
+        if (last_gate_log_tp.time_since_epoch().count() != 0 &&
+            std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_gate_log_tp).count() < 1)
+        {
+            return;
+        }
+        std::cout << LOGGER::INFO
+                  << "[NAV][GATE] mode=ON blocked_by=" << reason
+                  << " rl_init_done=" << (this->rl_init_done ? 1 : 0)
+                  << " goal_seq=" << goal_seq_now
+                  << std::endl;
+        last_gate_log_tp = now_tp;
+    };
+    const auto clear_nav_cmd = [this]() {
+        this->nav_cmd_x_.store(0.0);
+        this->nav_cmd_y_.store(0.0);
+        this->nav_cmd_yaw_.store(0.0);
+        if (this->nav_high_command_.defined())
+        {
+            this->nav_high_command_.zero_();
+        }
+    };
     if (!this->rl_init_done)
     {
+        clear_nav_cmd();
+        maybe_log_gate("rl_not_ready", this->nav_goal_seq_.load());
         return;
     }
 
     const uint64_t goal_seq = this->nav_goal_seq_.load();
     if (goal_seq == 0)
     {
+        clear_nav_cmd();
+        maybe_log_gate("no_goal", goal_seq);
         return;
     }
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
@@ -1308,7 +1417,10 @@ void RL_Real::RunHighLevel()
     {
         this->nav_obs_hist_buf_.reset_from_0({0}, obs_frame);
         this->nav_obs_io_hist_buf_.reset_from_0({0}, obs_io_frame);
-        this->nav_highfreq_buf_.reset({0}, obs_io_frame_hf);
+        {
+            std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
+            this->nav_highfreq_buf_.reset({0}, obs_io_frame_hf);
+        }
     }
     else
     {
@@ -1458,6 +1570,17 @@ void RL_Real::RunHighLevel()
     this->nav_cmd_y_.store(cmd[0][1].item<double>());
     this->nav_cmd_yaw_.store(cmd[0][2].item<double>());
     this->nav_high_command_ = cmd.to(torch::kFloat32);
+#if defined(USE_ROS2)
+    // Debug output: clipped high-level command generated this nav tick.
+    if (this->nav_cmd_high_publisher_)
+    {
+        geometry_msgs::msg::Vector3 msg;
+        msg.x = cmd[0][0].item<double>();
+        msg.y = cmd[0][1].item<double>();
+        msg.z = cmd[0][2].item<double>();
+        this->nav_cmd_high_publisher_->publish(msg);
+    }
+#endif
 
     this->nav_timer_left_.store(std::max(0.0, timer_left - this->nav_dt_));
     this->nav_time_io_.store(time_io + this->nav_dt_);
