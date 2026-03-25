@@ -426,7 +426,7 @@ void RL_Real::RobotControl()
     this->motiontime++;
     using SteadyClock = std::chrono::steady_clock;
     static uint64_t last_nav_hl_beat_seq = 0;
-    static int stale_nav_ticks = 0;
+    static SteadyClock::time_point last_nav_hl_beat_tp{};
     static SteadyClock::time_point last_stale_warn_tp{};
 
     if (this->nav_enabled_.load())
@@ -438,45 +438,49 @@ void RL_Real::RobotControl()
         // Safety watchdog: once high-level produced at least one output, if beat seq
         // stops changing while navigation is ON, clear stale commands.
         const uint64_t beat_seq = this->nav_hl_beat_seq_.load();
-        if (beat_seq > 0 && beat_seq == last_nav_hl_beat_seq)
+        if (beat_seq > 0 && beat_seq != last_nav_hl_beat_seq)
         {
-            ++stale_nav_ticks;
-        }
-        else
-        {
-            stale_nav_ticks = 0;
             last_nav_hl_beat_seq = beat_seq;
+            last_nav_hl_beat_tp = SteadyClock::now();
         }
 
-        constexpr int kMaxStaleControlTicks = 60; // ~0.3s at 200Hz control loop
-        if (beat_seq > 0 && stale_nav_ticks > kMaxStaleControlTicks)
+        // Only watchdog in RL running stage. During GetUp/GetDown/Passive, rl_init_done=false
+        // and high-level heartbeat is expected to stop.
+        const bool can_watchdog = this->rl_init_done && beat_seq > 0;
+        if (can_watchdog && last_nav_hl_beat_tp.time_since_epoch().count() != 0)
         {
-            this->control.x = 0.0;
-            this->control.y = 0.0;
-            this->control.yaw = 0.0;
-            this->nav_cmd_x_.store(0.0);
-            this->nav_cmd_y_.store(0.0);
-            this->nav_cmd_yaw_.store(0.0);
-            if (this->nav_high_command_.defined())
-            {
-                this->nav_high_command_.zero_();
-            }
-
             const auto now_tp = SteadyClock::now();
-            if (last_stale_warn_tp.time_since_epoch().count() == 0 ||
-                std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_stale_warn_tp).count() >= 1)
+            constexpr int64_t kMaxNoBeatMs = 1200; // allow occasional slow inference without false alarm
+            const int64_t no_beat_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - last_nav_hl_beat_tp).count();
+            if (no_beat_ms > kMaxNoBeatMs)
             {
-                std::cout << LOGGER::WARNING
-                          << "[NAV][SAFE] high-level heartbeat stale, command cleared"
-                          << std::endl;
-                last_stale_warn_tp = now_tp;
+                this->control.x = 0.0;
+                this->control.y = 0.0;
+                this->control.yaw = 0.0;
+                this->nav_cmd_x_.store(0.0);
+                this->nav_cmd_y_.store(0.0);
+                this->nav_cmd_yaw_.store(0.0);
+                if (this->nav_high_command_.defined())
+                {
+                    this->nav_high_command_.zero_();
+                }
+
+                if (last_stale_warn_tp.time_since_epoch().count() == 0 ||
+                    std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_stale_warn_tp).count() >= 1)
+                {
+                    std::cout << LOGGER::WARNING
+                              << "[NAV][SAFE] high-level heartbeat stale (" << no_beat_ms
+                              << "ms), command cleared"
+                              << std::endl;
+                    last_stale_warn_tp = now_tp;
+                }
             }
         }
     }
     else
     {
-        stale_nav_ticks = 0;
         last_nav_hl_beat_seq = this->nav_hl_beat_seq_.load();
+        last_nav_hl_beat_tp = SteadyClock::time_point{};
         if (this->control.current_keyboard == Input::Keyboard::W)
         {
             this->control.x += 0.1;
