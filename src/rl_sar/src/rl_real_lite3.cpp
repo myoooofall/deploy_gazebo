@@ -12,6 +12,7 @@
 #include <torch/csrc/jit/passes/graph_fuser.h>
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
 #include <torch/csrc/jit/python/update_graph_executor_opt.h>
+#include <torch/csrc/jit/runtime/graph_executor.h>
 
 static std::atomic<bool> g_depth_frame_received{false};
 
@@ -22,8 +23,10 @@ static void ConfigureTorchJitForRealtime()
         torch::jit::setGraphExecutorOptimize(false);
         torch::jit::setTensorExprFuserEnabled(false);
         torch::jit::overrideCanFuseOnCPULegacy(false);
+        torch::jit::getProfilingMode() = false;
+        torch::jit::getExecutorMode() = false;
         std::cout << LOGGER::INFO
-                  << "[NAV][TORCH] disabled JIT graph optimize + tensor fuser (stability mode)"
+                  << "[NAV][TORCH] disabled JIT optimize/fuser/profiling executor (stability mode)"
                   << std::endl;
     });
 }
@@ -422,7 +425,7 @@ void RL_Real::RobotControl()
 {
     this->motiontime++;
     using SteadyClock = std::chrono::steady_clock;
-    static double last_nav_time_io = -1.0;
+    static uint64_t last_nav_hl_beat_seq = 0;
     static int stale_nav_ticks = 0;
     static SteadyClock::time_point last_stale_warn_tp{};
 
@@ -432,21 +435,21 @@ void RL_Real::RobotControl()
         this->control.y = this->nav_cmd_y_.load();
         this->control.yaw = this->nav_cmd_yaw_.load();
 
-        // Safety watchdog: if high-level thread stops advancing nav_time_io_
-        // while navigation is ON, clear stale commands instead of reusing last cmd.
-        const double nav_time_io_now = this->nav_time_io_.load();
-        if (std::fabs(nav_time_io_now - last_nav_time_io) <= 1e-9)
+        // Safety watchdog: once high-level produced at least one output, if beat seq
+        // stops changing while navigation is ON, clear stale commands.
+        const uint64_t beat_seq = this->nav_hl_beat_seq_.load();
+        if (beat_seq > 0 && beat_seq == last_nav_hl_beat_seq)
         {
             ++stale_nav_ticks;
         }
         else
         {
             stale_nav_ticks = 0;
-            last_nav_time_io = nav_time_io_now;
+            last_nav_hl_beat_seq = beat_seq;
         }
 
         constexpr int kMaxStaleControlTicks = 60; // ~0.3s at 200Hz control loop
-        if (stale_nav_ticks > kMaxStaleControlTicks)
+        if (beat_seq > 0 && stale_nav_ticks > kMaxStaleControlTicks)
         {
             this->control.x = 0.0;
             this->control.y = 0.0;
@@ -473,7 +476,7 @@ void RL_Real::RobotControl()
     else
     {
         stale_nav_ticks = 0;
-        last_nav_time_io = this->nav_time_io_.load();
+        last_nav_hl_beat_seq = this->nav_hl_beat_seq_.load();
         if (this->control.current_keyboard == Input::Keyboard::W)
         {
             this->control.x += 0.1;
@@ -1330,6 +1333,7 @@ void RL_Real::RunHighLevel()
         this->nav_timer_left_.store(this->nav_episode_length_s_);
         this->nav_time_io_.store(0.0);
         this->nav_time_io_hf_.store(0.0);
+        this->nav_hl_beat_seq_.store(0);
         this->nav_high_command_.zero_();
         this->nav_cmd_x_.store(0.0);
         this->nav_cmd_y_.store(0.0);
@@ -1570,6 +1574,7 @@ void RL_Real::RunHighLevel()
     this->nav_cmd_y_.store(cmd[0][1].item<double>());
     this->nav_cmd_yaw_.store(cmd[0][2].item<double>());
     this->nav_high_command_ = cmd.to(torch::kFloat32);
+    this->nav_hl_beat_seq_.fetch_add(1);
 #if defined(USE_ROS2)
     // Debug output: clipped high-level command generated this nav tick.
     if (this->nav_cmd_high_publisher_)

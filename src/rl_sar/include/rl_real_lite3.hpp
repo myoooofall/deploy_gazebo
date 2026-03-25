@@ -151,6 +151,7 @@ private:
     // Time since current nav episode start for high-frequency buffer (advanced by params.dt).
     std::atomic<double> nav_time_io_hf_{0.0};
     std::atomic<double> nav_timer_left_{0.0};
+    std::atomic<uint64_t> nav_hl_beat_seq_{0};
 
     std::mutex nav_last_actions_mutex_;
     std::vector<float> nav_last_actions_;
