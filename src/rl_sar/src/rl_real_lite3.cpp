@@ -135,7 +135,7 @@ RL_Real::RL_Real()
         "/nav/goal_error_body", rclcpp::SystemDefaultsQoS());
 
     std::cout << LOGGER::INFO
-              << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body}"
+              << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body} (fallback: body-frame on same goal topics when /Odometry is absent)"
               << std::endl;
 #endif
 
@@ -829,6 +829,7 @@ void RL_Real::PublishNavGoalComparison(
     double base_yaw = 0.0;
     rclcpp::Time base_stamp(0, 0, RCL_ROS_TIME);
 
+    bool has_odom = false;
     {
         std::lock_guard<std::mutex> lock(this->odom_pose_mutex_);
         if (!this->odom_pose_received_)
@@ -839,17 +840,86 @@ void RL_Real::PublishNavGoalComparison(
                 std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_warn_tp).count() >= 1)
             {
                 std::cout << LOGGER::WARNING
-                          << "[NAV][COMPARE] waiting for /Odometry, skip map-frame target projection"
+                          << "[NAV][COMPARE] /Odometry unavailable, publish body-frame goals on existing goal topics"
                           << std::endl;
                 last_warn_tp = now_tp;
             }
+        }
+        else
+        {
+            has_odom = true;
+            base_x = this->odom_map_x_;
+            base_y = this->odom_map_y_;
+            base_yaw = this->odom_map_yaw_;
+            base_stamp = this->odom_stamp_;
+        }
+    }
+
+    if (!has_odom)
+    {
+        const rclcpp::Time now_stamp = this->get_clock()->now();
+        const double actual_body_x = this->nav_goal_body_x_.load();
+        const double actual_body_y = this->nav_goal_body_y_.load();
+        const double actual_body_yaw = this->nav_goal_body_yaw_.load();
+
+        geometry_msgs::msg::PoseStamped actual_pose;
+        actual_pose.header.frame_id = "base_link";
+        actual_pose.header.stamp = now_stamp;
+        actual_pose.pose.position.x = actual_body_x;
+        actual_pose.pose.position.y = actual_body_y;
+        actual_pose.pose.position.z = 0.0;
+        float q_actual[4];
+        this->EulerToQuaternion(0.0f, 0.0f, static_cast<float>(actual_body_yaw), q_actual);
+        actual_pose.pose.orientation.w = q_actual[0];
+        actual_pose.pose.orientation.x = q_actual[1];
+        actual_pose.pose.orientation.y = q_actual[2];
+        actual_pose.pose.orientation.z = q_actual[3];
+        this->nav_goal_actual_map_publisher_->publish(actual_pose);
+
+        if (!pred_target_body.defined() || pred_target_body.numel() < 2)
+        {
             return;
         }
 
-        base_x = this->odom_map_x_;
-        base_y = this->odom_map_y_;
-        base_yaw = this->odom_map_yaw_;
-        base_stamp = this->odom_stamp_;
+        torch::Tensor pred_flat;
+        try
+        {
+            pred_flat = pred_target_body.to(torch::kFloat32).view({-1});
+        }
+        catch (const std::exception &)
+        {
+            return;
+        }
+
+        if (pred_flat.numel() < 2)
+        {
+            return;
+        }
+
+        const double pred_body_x = pred_flat[0].item<double>();
+        const double pred_body_y = pred_flat[1].item<double>();
+        const double pred_body_yaw = (pred_flat.numel() >= 3) ? pred_flat[2].item<double>() : 0.0;
+
+        geometry_msgs::msg::PoseStamped pred_pose;
+        pred_pose.header.frame_id = "base_link";
+        pred_pose.header.stamp = now_stamp;
+        pred_pose.pose.position.x = pred_body_x;
+        pred_pose.pose.position.y = pred_body_y;
+        pred_pose.pose.position.z = 0.0;
+        float q_pred[4];
+        this->EulerToQuaternion(0.0f, 0.0f, static_cast<float>(pred_body_yaw), q_pred);
+        pred_pose.pose.orientation.w = q_pred[0];
+        pred_pose.pose.orientation.x = q_pred[1];
+        pred_pose.pose.orientation.y = q_pred[2];
+        pred_pose.pose.orientation.z = q_pred[3];
+        this->nav_goal_pred_map_publisher_->publish(pred_pose);
+
+        geometry_msgs::msg::Vector3 error_body;
+        error_body.x = pred_body_x - actual_body_x;
+        error_body.y = pred_body_y - actual_body_y;
+        error_body.z = WrapToPi(pred_body_yaw - actual_body_yaw);
+        this->nav_goal_error_body_publisher_->publish(error_body);
+        return;
     }
 
     if (new_goal || !this->nav_goal_actual_map_valid_ || this->nav_goal_actual_map_goal_seq_ != goal_seq)

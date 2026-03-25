@@ -152,6 +152,9 @@ if(NOT USE_CMAKE AND $ENV{ROS_DISTRO} MATCHES "foxy|humble")
         scripts/actuator_net.py 
         scripts/nav_goal_dialog.py 
         scripts/generate_terrain_world.py # <--- 补上了这个
+        scripts/offline/record_lite3_raw_bag.sh
+        scripts/offline/replay_localize_and_record.sh
+        scripts/offline/export_goal_metrics_from_bag.py
         DESTINATION lib/${PROJECT_NAME}
     )
     install(DIRECTORY launch worlds policy DESTINATION share/${PROJECT_NAME})
