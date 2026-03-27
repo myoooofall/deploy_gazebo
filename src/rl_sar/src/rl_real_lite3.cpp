@@ -1173,22 +1173,41 @@ bool RL_Real::InitHierarchicalNav()
     // optional params (safe defaults)
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
-    if (config["clip_commands_lin"])
+    if (!config["clip_commands_vx"] || !config["clip_commands_vy"] || !config["clip_commands_w"])
     {
-        this->nav_clip_lin_ = config["clip_commands_lin"].as<double>();
+        std::ostringstream oss;
+        oss << "Nav config must contain clip_commands_vx/clip_commands_vy/clip_commands_w in "
+            << this->nav_config_path_;
+        throw std::runtime_error(oss.str());
     }
-    if (config["clip_commands_ang"])
+    this->nav_command_clip_x_ = config["clip_commands_vx"].as<double>();
+    this->nav_command_clip_y_ = config["clip_commands_vy"].as<double>();
+    this->nav_command_clip_yaw_ = config["clip_commands_w"].as<double>();
+    this->nav_command_clip_x_ = std::fabs(this->nav_command_clip_x_);
+    this->nav_command_clip_y_ = std::fabs(this->nav_command_clip_y_);
+    this->nav_command_clip_yaw_ = std::fabs(this->nav_command_clip_yaw_);
+
+    if (config["high_command_filter_alpha"])
     {
-        this->nav_clip_ang_ = config["clip_commands_ang"].as<double>();
+        this->nav_high_command_filter_alpha_ = config["high_command_filter_alpha"].as<double>();
     }
-    if (config["clip_commands"] && !config["clip_commands_lin"] && !config["clip_commands_ang"])
+    if (this->nav_high_command_filter_alpha_ < 0.0) this->nav_high_command_filter_alpha_ = 0.0;
+    if (this->nav_high_command_filter_alpha_ > 1.0) this->nav_high_command_filter_alpha_ = 1.0;
+    if (config["high_command_max_step_lin_x"])
     {
-        const double legacy_clip = config["clip_commands"].as<double>();
-        this->nav_clip_lin_ = legacy_clip;
-        this->nav_clip_ang_ = legacy_clip;
+        this->nav_high_command_max_step_x_ = config["high_command_max_step_lin_x"].as<double>();
     }
-    this->nav_clip_lin_ = std::fabs(this->nav_clip_lin_);
-    this->nav_clip_ang_ = std::fabs(this->nav_clip_ang_);
+    if (config["high_command_max_step_lin_y"])
+    {
+        this->nav_high_command_max_step_y_ = config["high_command_max_step_lin_y"].as<double>();
+    }
+    if (config["high_command_max_step_yaw"])
+    {
+        this->nav_high_command_max_step_yaw_ = config["high_command_max_step_yaw"].as<double>();
+    }
+    this->nav_high_command_max_step_x_ = std::fabs(this->nav_high_command_max_step_x_);
+    this->nav_high_command_max_step_y_ = std::fabs(this->nav_high_command_max_step_y_);
+    this->nav_high_command_max_step_yaw_ = std::fabs(this->nav_high_command_max_step_yaw_);
     if (config["vision_channels"])
     {
         const int channels = config["vision_channels"].as<int>();
@@ -1218,8 +1237,15 @@ bool RL_Real::InitHierarchicalNav()
     std::cout << LOGGER::INFO
               << "Nav vision_channels=" << this->nav_vision_channels_
               << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
-              << ", clip_lin=" << this->nav_clip_lin_
-              << ", clip_ang=" << this->nav_clip_ang_
+              << ", cmd_clip=["
+              << this->nav_command_clip_x_ << ", "
+              << this->nav_command_clip_y_ << ", "
+              << this->nav_command_clip_yaw_ << "]"
+              << ", cmd_filter_alpha=" << this->nav_high_command_filter_alpha_
+              << ", cmd_step_limits=["
+              << this->nav_high_command_max_step_x_ << ", "
+              << this->nav_high_command_max_step_y_ << ", "
+              << this->nav_high_command_max_step_yaw_ << "]"
               << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
               << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
               << ", perf_log_interval_s=" << this->nav_perf_log_interval_s_
@@ -1577,13 +1603,48 @@ void RL_Real::RunHighLevel()
         }
     }
 
-    const torch::Tensor cmd_raw = cmd.to(torch::kFloat32);
-    const auto cmd_device = cmd_raw.device();
-    const torch::Tensor clip_high = torch::tensor(
-        {static_cast<float>(this->nav_clip_lin_), static_cast<float>(this->nav_clip_lin_), static_cast<float>(this->nav_clip_ang_)},
+    torch::Tensor source_command = cmd.to(torch::kFloat32);
+    if (source_command.dim() == 1)
+    {
+        source_command = source_command.view({1, -1});
+    }
+    source_command = source_command.slice(1, 0, 3);
+    const auto cmd_device = source_command.device();
+
+    torch::Tensor last_high_command = torch::zeros(
+        {1, 3},
+        torch::TensorOptions().dtype(torch::kFloat32).device(cmd_device));
+    if (this->nav_high_command_.defined() && this->nav_high_command_.numel() >= 3)
+    {
+        last_high_command = this->nav_high_command_.to(
+            torch::TensorOptions().dtype(torch::kFloat32).device(cmd_device));
+        if (last_high_command.dim() == 1)
+        {
+            last_high_command = last_high_command.view({1, -1});
+        }
+        last_high_command = last_high_command.slice(1, 0, 3);
+    }
+
+    const float filter_alpha = static_cast<float>(this->nav_high_command_filter_alpha_);
+    torch::Tensor filtered_command =
+        filter_alpha * last_high_command + (1.0f - filter_alpha) * source_command;
+    const torch::Tensor high_command_step_limits = torch::tensor(
+        {static_cast<float>(this->nav_high_command_max_step_x_),
+         static_cast<float>(this->nav_high_command_max_step_y_),
+         static_cast<float>(this->nav_high_command_max_step_yaw_)},
         torch::TensorOptions().dtype(torch::kFloat32).device(cmd_device)).view({1, 3});
-    const torch::Tensor clip_low = -clip_high;
-    cmd = torch::max(torch::min(cmd_raw, clip_high), clip_low);
+    const torch::Tensor filtered_delta = filtered_command - last_high_command;
+    filtered_command = last_high_command + torch::max(
+        torch::min(filtered_delta, high_command_step_limits),
+        -high_command_step_limits);
+
+    const torch::Tensor command_clip_limits = torch::tensor(
+        {static_cast<float>(this->nav_command_clip_x_),
+         static_cast<float>(this->nav_command_clip_y_),
+         static_cast<float>(this->nav_command_clip_yaw_)},
+        torch::TensorOptions().dtype(torch::kFloat32).device(cmd_device)).view({1, 3});
+    cmd = torch::max(torch::min(filtered_command, command_clip_limits), -command_clip_limits);
+    const torch::Tensor cmd_raw = source_command;
 
     static auto last_nav_run_log_tp = std::chrono::steady_clock::time_point{};
     const auto now_tp = std::chrono::steady_clock::now();
@@ -1618,7 +1679,10 @@ void RL_Real::RunHighLevel()
         {
             oss << "[NA]";
         }
-        oss << " cmd:[" << cmd[0][0].item<double>() << ", "
+        oss << " cmd_raw:[" << cmd_raw[0][0].item<double>() << ", "
+            << cmd_raw[0][1].item<double>() << ", "
+            << cmd_raw[0][2].item<double>() << "]"
+            << " cmd:[" << cmd[0][0].item<double>() << ", "
             << cmd[0][1].item<double>() << ", "
             << cmd[0][2].item<double>() << "]";
         std::cout << LOGGER::INFO << oss.str() << std::endl;
