@@ -52,6 +52,8 @@ TOPICS_COMMON=(
   /nav/goal_actual_map
   /nav/goal_pred_map
   /nav/goal_error_body
+  /nav/cmd_high
+  /nav/cmd_applied
   /nav_goal_body
 )
 

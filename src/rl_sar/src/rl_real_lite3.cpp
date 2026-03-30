@@ -38,6 +38,52 @@ static double WrapToPi(double a)
     return a;
 }
 
+static std::string TensorShapeToString(const torch::Tensor &tensor)
+{
+    if (!tensor.defined())
+    {
+        return "undefined";
+    }
+    std::ostringstream oss;
+    oss << "[";
+    for (int64_t i = 0; i < tensor.dim(); ++i)
+    {
+        if (i > 0) oss << "x";
+        oss << tensor.size(i);
+    }
+    oss << "]";
+    return oss.str();
+}
+
+static std::string TensorFlatToString(const torch::Tensor &tensor, int max_elems = -1)
+{
+    if (!tensor.defined())
+    {
+        return "undefined";
+    }
+    torch::Tensor flat = tensor.to(torch::kCPU, torch::kFloat32).contiguous().view({-1});
+    const int64_t n = flat.size(0);
+    int64_t shown = n;
+    if (max_elems > 0 && static_cast<int64_t>(max_elems) < n)
+    {
+        shown = static_cast<int64_t>(max_elems);
+    }
+    const float *ptr = flat.data_ptr<float>();
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(4) << "[";
+    for (int64_t i = 0; i < shown; ++i)
+    {
+        if (i > 0) oss << ", ";
+        oss << ptr[i];
+    }
+    if (shown < n)
+    {
+        oss << ", ... (" << n << " elems)";
+    }
+    oss << "]";
+    return oss.str();
+}
+
 #if defined(USE_ROS2)
 static geometry_msgs::msg::Quaternion YawToQuaternion(double yaw)
 {
@@ -1283,6 +1329,8 @@ bool RL_Real::InitHierarchicalNav()
 
 void RL_Real::UpdateHighFrequencyObs()
 {
+    static int hf_obs_debug_count = 0;
+
     const double t = this->nav_time_io_hf_.load() + this->params.dt;
     this->nav_time_io_hf_.store(t);
 
@@ -1308,6 +1356,21 @@ void RL_Real::UpdateHighFrequencyObs()
     torch::Tensor dof_vel_term = dof_vel * static_cast<float>(this->params.dof_vel_scale);
 
     torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term}, 1);
+
+    if (hf_obs_debug_count < 3)
+    {
+        hf_obs_debug_count++;
+        std::ostringstream oss;
+        oss << "[NAV][DBG][HF][" << hf_obs_debug_count << "/3] "
+            << "time_io=" << TensorFlatToString(time_io)
+            << " base_ang_vel=" << TensorFlatToString(base_ang_vel)
+            << " projected_gravity=" << TensorFlatToString(projected_gravity)
+            << " dof_pos_term=" << TensorFlatToString(dof_pos_term)
+            << " dof_vel_term=" << TensorFlatToString(dof_vel_term)
+            << " hf_shape=" << TensorShapeToString(hf);
+        std::cout << LOGGER::INFO << oss.str() << std::endl;
+    }
+
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
@@ -1317,6 +1380,7 @@ void RL_Real::UpdateHighFrequencyObs()
 void RL_Real::RunHighLevel()
 {
     using SteadyClock = std::chrono::steady_clock;
+    static int obs_debug_count = 0;
     static bool perf_inited = false;
     static SteadyClock::time_point perf_last_report_tp;
     static double perf_sum_vision_ms = 0.0;
@@ -1528,6 +1592,27 @@ void RL_Real::RunHighLevel()
     vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
     const double vision_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - vision_begin_tp).count();
 
+    if (obs_debug_count < 10)
+    {
+        obs_debug_count++;
+        std::ostringstream oss;
+        oss << "[NAV][DBG][OBS][" << obs_debug_count << "/10] "
+            << "goal_init=" << TensorFlatToString(this->nav_position_targets_body_initial_)
+            << " spawn_init=" << TensorFlatToString(this->nav_spawn_positions_body_initial_)
+            << " timer=" << TensorFlatToString(timer_tensor)
+            << " time_io=" << TensorFlatToString(time_io_tensor)
+            << " base_ang_vel=" << TensorFlatToString(base_ang_vel)
+            << " projected_gravity=" << TensorFlatToString(projected_gravity)
+            << " dof_pos_term=" << TensorFlatToString(dof_pos_term)
+            << " dof_vel_term=" << TensorFlatToString(dof_vel_term)
+            << " obs_frame_shape=" << TensorShapeToString(obs_frame)
+            << " obs_io_frame_shape=" << TensorShapeToString(obs_io_frame)
+            << " obs_io_frame_hf_shape=" << TensorShapeToString(obs_io_frame_hf)
+            << " vision_feat_shape=" << TensorShapeToString(vision_feat)
+            << " vision_feat_sample=" << TensorFlatToString(vision_feat, 16);
+        std::cout << LOGGER::INFO << oss.str() << std::endl;
+    }
+
     torch::Tensor cmd;
     torch::Tensor pred_target_body;
     const auto high_begin_tp = SteadyClock::now();
@@ -1699,13 +1784,13 @@ void RL_Real::RunHighLevel()
     this->nav_high_command_ = cmd.to(torch::kFloat32);
     this->nav_hl_beat_seq_.fetch_add(1);
 #if defined(USE_ROS2)
-    // Debug output: clipped high-level command generated this nav tick.
+    // Debug output: raw high-level command (before filter/step-limit/clip), aligned with training source_command.
     if (this->nav_cmd_high_publisher_)
     {
         geometry_msgs::msg::Vector3 msg;
-        msg.x = cmd[0][0].item<double>();
-        msg.y = cmd[0][1].item<double>();
-        msg.z = cmd[0][2].item<double>();
+        msg.x = cmd_raw[0][0].item<double>();
+        msg.y = cmd_raw[0][1].item<double>();
+        msg.z = cmd_raw[0][2].item<double>();
         this->nav_cmd_high_publisher_->publish(msg);
     }
 #endif

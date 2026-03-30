@@ -53,6 +53,7 @@ ros2 bag record -o "$OUT_DIR" \
   /Odometry \
   /tf /tf_static \
   /nav/goal_actual_map /nav/goal_pred_map /nav/goal_error_body \
+  /nav/cmd_high /nav/cmd_applied \
   /nav/goal_compare_markers \
   /nav_goal_body \
   /rslidar_points /imu/data &
