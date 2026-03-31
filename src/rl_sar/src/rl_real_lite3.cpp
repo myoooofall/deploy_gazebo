@@ -908,7 +908,7 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     depth_rate_gate_inited = true;
 
     const auto proc_begin_tp = SteadyClock::now();
-    torch::Tensor = depth_buffer.process_depth_image(
+    torch::Tensor processed_depth = depth_buffer.process_depth_image(
         msg,
         this->processed_depth_publisher,
         this->processed_depth_norm_publisher);
