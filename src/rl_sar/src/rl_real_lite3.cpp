@@ -55,7 +55,7 @@ static std::string TensorShapeToString(const torch::Tensor &tensor)
     return oss.str();
 }
 
-static std::string TensorFlatToString(const torch::Tensor &tensor, int max_elems = -1)
+static std::string TensorFlatToString(const torch::Tensor &tensor, int max_elems = -1, int precision = 4)
 {
     if (!tensor.defined())
     {
@@ -70,7 +70,7 @@ static std::string TensorFlatToString(const torch::Tensor &tensor, int max_elems
     }
     const float *ptr = flat.data_ptr<float>();
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(4) << "[";
+    oss << std::fixed << std::setprecision(precision) << "[";
     for (int64_t i = 0; i < shown; ++i)
     {
         if (i > 0) oss << ", ";
@@ -1330,6 +1330,28 @@ bool RL_Real::InitHierarchicalNav()
 void RL_Real::UpdateHighFrequencyObs()
 {
     static int hf_obs_debug_count = 0;
+    static bool hf_obs_debug_prev_active = false;
+    static uint64_t hf_obs_debug_goal_seq = 0;
+
+    const uint64_t goal_seq_now = this->nav_goal_seq_.load();
+    const bool hf_debug_active =
+        this->nav_enabled_.load() && this->rl_init_done && (goal_seq_now > 0);
+
+    if (!hf_debug_active)
+    {
+        hf_obs_debug_count = 0;
+        hf_obs_debug_prev_active = false;
+        hf_obs_debug_goal_seq = goal_seq_now;
+    }
+    else
+    {
+        if (!hf_obs_debug_prev_active || goal_seq_now != hf_obs_debug_goal_seq)
+        {
+            hf_obs_debug_count = 0;
+            hf_obs_debug_goal_seq = goal_seq_now;
+        }
+        hf_obs_debug_prev_active = true;
+    }
 
     const double t = this->nav_time_io_hf_.load() + this->params.dt;
     this->nav_time_io_hf_.store(t);
@@ -1357,16 +1379,17 @@ void RL_Real::UpdateHighFrequencyObs()
 
     torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term}, 1);
 
-    if (hf_obs_debug_count < 3)
+    if (hf_debug_active && hf_obs_debug_count < 10)
     {
         hf_obs_debug_count++;
         std::ostringstream oss;
-        oss << "[NAV][DBG][HF][" << hf_obs_debug_count << "/3] "
-            << "time_io=" << TensorFlatToString(time_io)
-            << " base_ang_vel=" << TensorFlatToString(base_ang_vel)
-            << " projected_gravity=" << TensorFlatToString(projected_gravity)
-            << " dof_pos_term=" << TensorFlatToString(dof_pos_term)
-            << " dof_vel_term=" << TensorFlatToString(dof_vel_term)
+        oss << "[NAV][DBG][HF][" << hf_obs_debug_count << "/10] "
+            << "goal_seq=" << goal_seq_now
+            << " time_io=" << TensorFlatToString(time_io, -1, 6)
+            << " base_ang_vel=" << TensorFlatToString(base_ang_vel, -1, 6)
+            << " projected_gravity=" << TensorFlatToString(projected_gravity, -1, 6)
+            << " dof_pos_term=" << TensorFlatToString(dof_pos_term, -1, 6)
+            << " dof_vel_term=" << TensorFlatToString(dof_vel_term, -1, 6)
             << " hf_shape=" << TensorShapeToString(hf);
         std::cout << LOGGER::INFO << oss.str() << std::endl;
     }
