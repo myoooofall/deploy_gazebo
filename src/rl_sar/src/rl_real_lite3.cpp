@@ -890,9 +890,10 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
 
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    // Match 10Hz temporal spacing used by navigation policy (assuming 60Hz depth stream).
-    constexpr int kDepthSubsample = 6;
-    if ((this->motion_time % kDepthSubsample) == 0) {
+    using SteadyClock = std::chrono::steady_clock;
+    const int depth_subsample = (this->nav_depth_subsample_ > 0) ? this->nav_depth_subsample_ : 1;
+    if ((this->motion_time % depth_subsample) == 0) {
+        const auto proc_begin_tp = SteadyClock::now();
         try
         {
             torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
@@ -900,6 +901,7 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
                 this->processed_depth_norm_publisher);
             // processed_depth shape: [30, 43], insert函数会处理batch维度
             depth_buffer.insert(processed_depth);
+            const double proc_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - proc_begin_tp).count();
 
             const bool first_depth_frame = !g_depth_frame_received.exchange(true);
             if (first_depth_frame)
@@ -907,6 +909,45 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
                 std::cout << LOGGER::INFO
                           << "[NAV][DEPTH] first processed depth frame received on /camera/depth/image_rect_raw"
                           << std::endl;
+            }
+
+            if (this->nav_debug_enable_)
+            {
+                static bool depth_perf_inited = false;
+                static SteadyClock::time_point depth_last_report_tp;
+                static double depth_sum_ms = 0.0;
+                static double depth_max_ms = 0.0;
+                static uint64_t depth_samples = 0;
+
+                if (!depth_perf_inited)
+                {
+                    depth_last_report_tp = SteadyClock::now();
+                    depth_perf_inited = true;
+                }
+                depth_sum_ms += proc_ms;
+                if (proc_ms > depth_max_ms) depth_max_ms = proc_ms;
+                depth_samples += 1;
+
+                const auto now_tp = SteadyClock::now();
+                const double interval_s = (this->nav_debug_log_interval_s_ > 0.0)
+                                              ? this->nav_debug_log_interval_s_
+                                              : 1.0;
+                if (std::chrono::duration<double>(now_tp - depth_last_report_tp).count() >= interval_s &&
+                    depth_samples > 0)
+                {
+                    const double avg_ms = depth_sum_ms / static_cast<double>(depth_samples);
+                    std::ostringstream oss;
+                    oss << std::fixed << std::setprecision(2)
+                        << "[NAV][DBG][DEPTH] samples=" << depth_samples
+                        << " depth_ms(avg/max)=[" << avg_ms << "/" << depth_max_ms << "]"
+                        << " subsample=" << depth_subsample;
+                    std::cout << LOGGER::INFO << oss.str() << std::endl;
+
+                    depth_sum_ms = 0.0;
+                    depth_max_ms = 0.0;
+                    depth_samples = 0;
+                    depth_last_report_tp = now_tp;
+                }
             }
         }
         catch (const std::exception &e)
@@ -1273,6 +1314,20 @@ bool RL_Real::InitHierarchicalNav()
         const double interval_s = config["perf_log_interval_s"].as<double>();
         this->nav_perf_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
     }
+    if (config["depth_subsample"])
+    {
+        const int depth_subsample = config["depth_subsample"].as<int>();
+        this->nav_depth_subsample_ = (depth_subsample > 0) ? depth_subsample : 1;
+    }
+    if (config["debug_enable"])
+    {
+        this->nav_debug_enable_ = config["debug_enable"].as<bool>();
+    }
+    if (config["debug_log_interval_s"])
+    {
+        const double interval_s = config["debug_log_interval_s"].as<double>();
+        this->nav_debug_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
+    }
     if (this->nav_vision_channels_ < 1)
     {
         this->nav_vision_channels_ = 1;
@@ -1292,9 +1347,12 @@ bool RL_Real::InitHierarchicalNav()
               << this->nav_high_command_max_step_x_ << ", "
               << this->nav_high_command_max_step_y_ << ", "
               << this->nav_high_command_max_step_yaw_ << "]"
+              << ", depth_subsample=" << this->nav_depth_subsample_
               << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
               << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
               << ", perf_log_interval_s=" << this->nav_perf_log_interval_s_
+              << ", debug_enable=" << (this->nav_debug_enable_ ? "true" : "false")
+              << ", debug_log_interval_s=" << this->nav_debug_log_interval_s_
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
@@ -1415,6 +1473,15 @@ void RL_Real::RunHighLevel()
     static double perf_max_vision_ms = 0.0;
     static double perf_max_high_ms = 0.0;
     static uint64_t perf_samples = 0;
+    static bool debug_inited = false;
+    static SteadyClock::time_point debug_last_report_tp;
+    static double debug_sum_total_ms = 0.0;
+    static double debug_max_total_ms = 0.0;
+    static double debug_sum_vision_ms = 0.0;
+    static double debug_max_vision_ms = 0.0;
+    static double debug_sum_high_ms = 0.0;
+    static double debug_max_high_ms = 0.0;
+    static uint64_t debug_samples = 0;
 
     if (!this->nav_enabled_.load())
     {
@@ -1459,6 +1526,7 @@ void RL_Real::RunHighLevel()
         return;
     }
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
+    const auto hl_begin_tp = SteadyClock::now();
 
     const double goal_body_x_initial = this->nav_goal_body_x_.load();
     const double goal_body_y_initial = this->nav_goal_body_y_.load();
@@ -1824,6 +1892,51 @@ void RL_Real::RunHighLevel()
 
     this->nav_timer_left_.store(std::max(0.0, timer_left - this->nav_dt_));
     this->nav_time_io_.store(time_io + this->nav_dt_);
+
+    if (this->nav_debug_enable_)
+    {
+        const double total_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - hl_begin_tp).count();
+        if (!debug_inited)
+        {
+            debug_last_report_tp = SteadyClock::now();
+            debug_inited = true;
+        }
+        debug_sum_total_ms += total_ms;
+        if (total_ms > debug_max_total_ms) debug_max_total_ms = total_ms;
+        debug_sum_vision_ms += vision_ms;
+        if (vision_ms > debug_max_vision_ms) debug_max_vision_ms = vision_ms;
+        debug_sum_high_ms += high_ms;
+        if (high_ms > debug_max_high_ms) debug_max_high_ms = high_ms;
+        debug_samples += 1;
+
+        const auto now_tp = SteadyClock::now();
+        const double interval_s = (this->nav_debug_log_interval_s_ > 0.0)
+                                      ? this->nav_debug_log_interval_s_
+                                      : 1.0;
+        if (std::chrono::duration<double>(now_tp - debug_last_report_tp).count() >= interval_s &&
+            debug_samples > 0)
+        {
+            const double avg_total_ms = debug_sum_total_ms / static_cast<double>(debug_samples);
+            const double avg_vision_ms = debug_sum_vision_ms / static_cast<double>(debug_samples);
+            const double avg_high_ms = debug_sum_high_ms / static_cast<double>(debug_samples);
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2)
+                << "[NAV][DBG][HL] samples=" << debug_samples
+                << " total_ms(avg/max)=[" << avg_total_ms << "/" << debug_max_total_ms << "]"
+                << " vision_ms(avg/max)=[" << avg_vision_ms << "/" << debug_max_vision_ms << "]"
+                << " high_ms(avg/max)=[" << avg_high_ms << "/" << debug_max_high_ms << "]";
+            std::cout << LOGGER::INFO << oss.str() << std::endl;
+
+            debug_sum_total_ms = 0.0;
+            debug_max_total_ms = 0.0;
+            debug_sum_vision_ms = 0.0;
+            debug_max_vision_ms = 0.0;
+            debug_sum_high_ms = 0.0;
+            debug_max_high_ms = 0.0;
+            debug_samples = 0;
+            debug_last_report_tp = now_tp;
+        }
+    }
 }
 
 

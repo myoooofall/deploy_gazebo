@@ -132,6 +132,7 @@ private:
     int nav_vision_channels_ = 1;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
+    int nav_depth_subsample_ = 6;       // depth callback subsample ratio (processed every N frames)
     // Training-aligned high command shaping params:
     // filtered = alpha * last + (1-alpha) * raw
     // delta-limited by high_command_max_step_*
@@ -146,6 +147,8 @@ private:
     int nav_watchdog_timeout_ms_ = 1200; // stale high-level heartbeat timeout
     bool nav_perf_log_enable_ = false;   // 1Hz-ish high-level perf stats
     double nav_perf_log_interval_s_ = 1.0;
+    bool nav_debug_enable_ = false;      // extra debug timing logs
+    double nav_debug_log_interval_s_ = 1.0;
 
     std::mutex nav_highfreq_mutex_;
     std::mutex nav_state_mutex_;

@@ -19,6 +19,9 @@ lite3/navi:
   watchdog_timeout_ms: 3000
   perf_log_enable: true
   perf_log_interval_s: 1.0
+  depth_subsample: 6
+  debug_enable: True
+  debug_log_interval_s: 1.0
   vision_channels: 8
   momentum_factor: 0.95
   num_observations: 45
