@@ -1334,21 +1334,24 @@ void RL_Real::UpdateHighFrequencyObs()
     static uint64_t hf_obs_debug_goal_seq = 0;
 
     const uint64_t goal_seq_now = this->nav_goal_seq_.load();
+    const uint64_t active_goal_seq_now = this->nav_active_goal_seq_.load();
+    const bool goal_consumed_by_high_level =
+        (goal_seq_now > 0) && (goal_seq_now == active_goal_seq_now);
     const bool hf_debug_active =
-        this->nav_enabled_.load() && this->rl_init_done && (goal_seq_now > 0);
+        this->nav_enabled_.load() && this->rl_init_done && goal_consumed_by_high_level;
 
     if (!hf_debug_active)
     {
         hf_obs_debug_count = 0;
         hf_obs_debug_prev_active = false;
-        hf_obs_debug_goal_seq = goal_seq_now;
+        hf_obs_debug_goal_seq = active_goal_seq_now;
     }
     else
     {
-        if (!hf_obs_debug_prev_active || goal_seq_now != hf_obs_debug_goal_seq)
+        if (!hf_obs_debug_prev_active || active_goal_seq_now != hf_obs_debug_goal_seq)
         {
             hf_obs_debug_count = 0;
-            hf_obs_debug_goal_seq = goal_seq_now;
+            hf_obs_debug_goal_seq = active_goal_seq_now;
         }
         hf_obs_debug_prev_active = true;
     }
@@ -1385,6 +1388,7 @@ void RL_Real::UpdateHighFrequencyObs()
         std::ostringstream oss;
         oss << "[NAV][DBG][HF][" << hf_obs_debug_count << "/10] "
             << "goal_seq=" << goal_seq_now
+            << " active_goal_seq=" << active_goal_seq_now
             << " time_io=" << TensorFlatToString(time_io, -1, 6)
             << " base_ang_vel=" << TensorFlatToString(base_ang_vel, -1, 6)
             << " projected_gravity=" << TensorFlatToString(projected_gravity, -1, 6)
