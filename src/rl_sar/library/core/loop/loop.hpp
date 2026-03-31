@@ -17,6 +17,7 @@
 #include <sstream>
 #include <iomanip>
 #include <exception>
+#include <cstdint>
 
 class LoopFunc
 {
@@ -65,10 +66,17 @@ private:
 
     void loop()
     {
+        const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(_period));
+        const auto statWindow = std::chrono::seconds(1);
+        auto nextWakeup = std::chrono::steady_clock::now();
+        auto windowStart = nextWakeup;
+        uint64_t windowCycles = 0;
+        uint64_t windowOverruns = 0;
+        double windowMaxOverrunMs = 0.0;
         while (_running)
         {
-            auto start = std::chrono::steady_clock::now();
-
+            const auto cycleStart = std::chrono::steady_clock::now();
             try
             {
                 _func();
@@ -84,17 +92,54 @@ private:
                 std::terminate();
             }
 
-            auto end = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            auto sleepTime = std::chrono::milliseconds(static_cast<int>((_period * 1000) - elapsed.count()));
-            if (sleepTime.count() > 0)
+            nextWakeup += period;
+            const auto end = std::chrono::steady_clock::now();
+            ++windowCycles;
+
+            // Keep strict periodic pacing: if this cycle overruns, skip missed slots
+            // instead of running back-to-back catch-up cycles.
+            if (end > nextWakeup)
             {
-                std::unique_lock<std::mutex> lock(_mutex);
-                if (_cv.wait_for(lock, sleepTime, [this]
-                                 { return !_running; }))
+                const auto lag = end - nextWakeup;
+                const auto missed = static_cast<long long>(lag / period) + 1LL;
+                nextWakeup += period * missed;
+            }
+
+            const auto execTime = end - cycleStart;
+            if (execTime > period)
+            {
+                ++windowOverruns;
+                const double overrunMs = std::chrono::duration<double, std::milli>(execTime - period).count();
+                if (overrunMs > windowMaxOverrunMs)
                 {
-                    break;
+                    windowMaxOverrunMs = overrunMs;
                 }
+            }
+
+            if (end - windowStart >= statWindow)
+            {
+                if (windowOverruns > 0)
+                {
+                    const double overrunRate = 100.0 * static_cast<double>(windowOverruns) / static_cast<double>(windowCycles);
+                    std::ostringstream oss;
+                    oss << "[Loop Overrun] named: " << _name
+                        << ", period_ms: " << std::fixed << std::setprecision(2) << (_period * 1000.0)
+                        << ", overruns: " << windowOverruns << "/" << windowCycles
+                        << " (" << std::setprecision(1) << overrunRate << "%)"
+                        << ", max_overrun_ms: " << std::setprecision(2) << windowMaxOverrunMs;
+                    log(oss.str());
+                }
+                windowStart = end;
+                windowCycles = 0;
+                windowOverruns = 0;
+                windowMaxOverrunMs = 0.0;
+            }
+
+            std::unique_lock<std::mutex> lock(_mutex);
+            if (_cv.wait_until(lock, nextWakeup, [this]
+                               { return !_running; }))
+            {
+                break;
             }
         }
     }

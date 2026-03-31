@@ -1,0 +1,35 @@
+/rslidar_points:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/imu/data:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/nav/goal_pred_map:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/nav/goal_actual_map:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/nav/goal_error_body:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/nav/cmd_high:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/nav/cmd_applied:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile

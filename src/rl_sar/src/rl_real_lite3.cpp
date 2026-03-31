@@ -891,71 +891,78 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     using SteadyClock = std::chrono::steady_clock;
-    const int depth_subsample = (this->nav_depth_subsample_ > 0) ? this->nav_depth_subsample_ : 1;
-    if ((this->motion_time % depth_subsample) == 0) {
-        const auto proc_begin_tp = SteadyClock::now();
-        try
+    const double target_period_s = (this->nav_dt_ > 0.0) ? this->nav_dt_ : 0.1;
+    static bool depth_rate_gate_inited = false;
+    static SteadyClock::time_point depth_last_accept_tp;
+
+    const auto now_tp = SteadyClock::now();
+    if (depth_rate_gate_inited)
+    {
+        const double elapsed_s = std::chrono::duration<double>(now_tp - depth_last_accept_tp).count();
+        if (elapsed_s < target_period_s)
         {
-            torch::Tensor processed_depth = depth_buffer.process_depth_image(msg,
-                this->processed_depth_publisher,
-                this->processed_depth_norm_publisher);
-            // processed_depth shape: [30, 43], insert函数会处理batch维度
-            depth_buffer.insert(processed_depth);
-            const double proc_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - proc_begin_tp).count();
-
-            const bool first_depth_frame = !g_depth_frame_received.exchange(true);
-            if (first_depth_frame)
-            {
-                std::cout << LOGGER::INFO
-                          << "[NAV][DEPTH] first processed depth frame received on /camera/depth/image_rect_raw"
-                          << std::endl;
-            }
-
-            if (this->nav_debug_enable_)
-            {
-                static bool depth_perf_inited = false;
-                static SteadyClock::time_point depth_last_report_tp;
-                static double depth_sum_ms = 0.0;
-                static double depth_max_ms = 0.0;
-                static uint64_t depth_samples = 0;
-
-                if (!depth_perf_inited)
-                {
-                    depth_last_report_tp = SteadyClock::now();
-                    depth_perf_inited = true;
-                }
-                depth_sum_ms += proc_ms;
-                if (proc_ms > depth_max_ms) depth_max_ms = proc_ms;
-                depth_samples += 1;
-
-                const auto now_tp = SteadyClock::now();
-                const double interval_s = (this->nav_debug_log_interval_s_ > 0.0)
-                                              ? this->nav_debug_log_interval_s_
-                                              : 1.0;
-                if (std::chrono::duration<double>(now_tp - depth_last_report_tp).count() >= interval_s &&
-                    depth_samples > 0)
-                {
-                    const double avg_ms = depth_sum_ms / static_cast<double>(depth_samples);
-                    std::ostringstream oss;
-                    oss << std::fixed << std::setprecision(2)
-                        << "[NAV][DBG][DEPTH] samples=" << depth_samples
-                        << " depth_ms(avg/max)=[" << avg_ms << "/" << depth_max_ms << "]"
-                        << " subsample=" << depth_subsample;
-                    std::cout << LOGGER::INFO << oss.str() << std::endl;
-
-                    depth_sum_ms = 0.0;
-                    depth_max_ms = 0.0;
-                    depth_samples = 0;
-                    depth_last_report_tp = now_tp;
-                }
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cout << LOGGER::ERROR << "[NAV][DEPTH] processing failed: " << e.what() << std::endl;
+            return;
         }
     }
-    ++this->motion_time;
+    depth_last_accept_tp = now_tp;
+    depth_rate_gate_inited = true;
+
+    const auto proc_begin_tp = SteadyClock::now();
+    torch::Tensor = depth_buffer.process_depth_image(
+        msg,
+        this->processed_depth_publisher,
+        this->processed_depth_norm_publisher);
+    // processed_depth shape: [30, 43], insert函数会处理batch维度
+    depth_buffer.insert(processed_depth);
+    const double proc_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - proc_begin_tp).count();
+
+    const bool first_depth_frame = !g_depth_frame_received.exchange(true);
+    if (first_depth_frame)
+    {
+        std::cout << LOGGER::INFO
+                  << "[NAV][DEPTH] first processed depth frame received on /camera/depth/image_rect_raw"
+                  << std::endl;
+    }
+
+    if (this->nav_debug_enable_)
+    {
+        static bool depth_perf_inited = false;
+        static SteadyClock::time_point depth_last_report_tp;
+        static double depth_sum_ms = 0.0;
+        static double depth_max_ms = 0.0;
+        static uint64_t depth_samples = 0;
+
+        if (!depth_perf_inited)
+        {
+            depth_last_report_tp = SteadyClock::now();
+            depth_perf_inited = true;
+        }
+        depth_sum_ms += proc_ms;
+        if (proc_ms > depth_max_ms) depth_max_ms = proc_ms;
+        depth_samples += 1;
+
+        const auto report_tp = SteadyClock::now();
+        const double interval_s = (this->nav_debug_log_interval_s_ > 0.0)
+                                      ? this->nav_debug_log_interval_s_
+                                      : 1.0;
+        if (std::chrono::duration<double>(report_tp - depth_last_report_tp).count() >= interval_s &&
+            depth_samples > 0)
+        {
+            const double avg_ms = depth_sum_ms / static_cast<double>(depth_samples);
+            const double target_hz = (target_period_s > 0.0) ? (1.0 / target_period_s) : 10.0;
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2)
+                << "[NAV][DBG][DEPTH] samples=" << depth_samples
+                << " depth_ms(avg/max)=[" << avg_ms << "/" << depth_max_ms << "]"
+                << " target_hz=" << target_hz;
+            std::cout << LOGGER::INFO << oss.str() << std::endl;
+
+            depth_sum_ms = 0.0;
+            depth_max_ms = 0.0;
+            depth_samples = 0;
+            depth_last_report_tp = report_tp;
+        }
+    }
 }
 
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
@@ -1314,11 +1321,6 @@ bool RL_Real::InitHierarchicalNav()
         const double interval_s = config["perf_log_interval_s"].as<double>();
         this->nav_perf_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
     }
-    if (config["depth_subsample"])
-    {
-        const int depth_subsample = config["depth_subsample"].as<int>();
-        this->nav_depth_subsample_ = (depth_subsample > 0) ? depth_subsample : 1;
-    }
     if (config["debug_enable"])
     {
         this->nav_debug_enable_ = config["debug_enable"].as<bool>();
@@ -1347,7 +1349,7 @@ bool RL_Real::InitHierarchicalNav()
               << this->nav_high_command_max_step_x_ << ", "
               << this->nav_high_command_max_step_y_ << ", "
               << this->nav_high_command_max_step_yaw_ << "]"
-              << ", depth_subsample=" << this->nav_depth_subsample_
+              << ", depth_target_hz=" << ((this->nav_dt_ > 0.0) ? (1.0 / this->nav_dt_) : 10.0)
               << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
               << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
               << ", perf_log_interval_s=" << this->nav_perf_log_interval_s_

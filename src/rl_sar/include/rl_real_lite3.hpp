@@ -132,7 +132,6 @@ private:
     int nav_vision_channels_ = 1;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
-    int nav_depth_subsample_ = 6;       // depth callback subsample ratio (processed every N frames)
     // Training-aligned high command shaping params:
     // filtered = alpha * last + (1-alpha) * raw
     // delta-limited by high_command_max_step_*
@@ -178,7 +177,6 @@ private:
 
 #if defined(USE_ROS2)
     // depth
-    int motion_time = 1;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_image_subscriber;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_norm_publisher;
