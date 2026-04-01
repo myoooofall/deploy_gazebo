@@ -1281,6 +1281,11 @@ bool RL_Real::InitHierarchicalNav()
     // optional params (safe defaults)
     if (config["nav_dt"]) this->nav_dt_ = config["nav_dt"].as<double>();
     if (config["nav_episode_length_s"]) this->nav_episode_length_s_ = config["nav_episode_length_s"].as<double>();
+    if (config["goal_stop_radius"])
+    {
+        this->nav_goal_stop_radius_ = config["goal_stop_radius"].as<double>();
+    }
+    this->nav_goal_stop_radius_ = std::max(0.0, this->nav_goal_stop_radius_);
     if (!config["clip_commands_vx"] || !config["clip_commands_vy"] || !config["clip_commands_w"])
     {
         std::ostringstream oss;
@@ -1363,6 +1368,7 @@ bool RL_Real::InitHierarchicalNav()
               << this->nav_high_command_max_step_x_ << ", "
               << this->nav_high_command_max_step_y_ << ", "
               << this->nav_high_command_max_step_yaw_ << "]"
+              << ", goal_stop_radius=" << this->nav_goal_stop_radius_
               << ", depth_target_hz=" << ((this->nav_dt_ > 0.0) ? (1.0 / this->nav_dt_) : 10.0)
               << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
               << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
@@ -1887,6 +1893,27 @@ void RL_Real::RunHighLevel()
             << cmd[0][2].item<double>() << "]";
         std::cout << LOGGER::INFO << oss.str() << std::endl;
         last_nav_run_log_tp = now_tp;
+    }
+
+    if (pred_target_body.defined() && pred_target_body.numel() >= 2)
+    {
+        const double pred_x = pred_target_body[0][0].item<double>();
+        const double pred_y = pred_target_body[0][1].item<double>();
+        const double goal_pred_radius = std::hypot(pred_x, pred_y);
+        if (goal_pred_radius <= this->nav_goal_stop_radius_)
+        {
+            this->nav_enabled_.store(false);
+            this->control.x = 0.0;
+            this->control.y = 0.0;
+            this->control.yaw = 0.0;
+            clear_nav_cmd();
+            std::cout << LOGGER::INFO
+                      << "[NAV][STOP] Navigation mode: OFF (goal reached, pred_radius="
+                      << goal_pred_radius << " <= " << this->nav_goal_stop_radius_
+                      << ")"
+                      << std::endl;
+            return;
+        }
     }
 
 #if defined(USE_ROS2)

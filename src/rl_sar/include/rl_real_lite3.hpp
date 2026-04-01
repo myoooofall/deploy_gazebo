@@ -133,6 +133,7 @@ private:
     int nav_vision_channels_ = 1;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
+    double nav_goal_stop_radius_ = 0.5; // stop nav when sqrt(pred_x^2 + pred_y^2) <= this
     // Training-aligned high command shaping params:
     // filtered = alpha * last + (1-alpha) * raw
     // delta-limited by high_command_max_step_*
