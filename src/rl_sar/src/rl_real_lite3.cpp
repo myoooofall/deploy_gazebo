@@ -170,7 +170,7 @@ RL_Real::RL_Real()
     );
 
     this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
-        "/camera/depth/image_rect_raw", rclcpp::SystemDefaultsQoS(),
+        "/camera/depth/image_rect_raw", rclcpp::SensorDataQoS().keep_last(1),
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
     this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
         "/camera/depth/processed", rclcpp::SystemDefaultsQoS());
@@ -182,7 +182,8 @@ RL_Real::RL_Real()
         "/imu/data", rclcpp::SystemDefaultsQoS());
 
     std::cout << LOGGER::INFO
-              << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw publish=/camera/depth/processed,/camera/depth/processed_norm"
+              << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw (cache_latest) "
+              << "publish=/camera/depth/processed,/camera/depth/processed_norm (loop_vision@nav_dt)"
               << std::endl;
     std::cout << LOGGER::INFO
               << "[SLAM][SDK2ROS] publish=/imu/data (sensor_msgs/Imu, source=lite3_sdk)"
@@ -218,11 +219,17 @@ RL_Real::RL_Real()
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::HandleKeyboard, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
     this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.dt * this->params.decimation, std::bind(&RL_Real::RunModel, this));
+#if defined(USE_ROS2)
+    this->loop_vision = std::make_shared<LoopFunc>("loop_vision", this->nav_dt_, std::bind(&RL_Real::RunVision, this));
+#endif
     this->loop_navi = std::make_shared<LoopFunc>("loop_nav", this->nav_dt_, std::bind(&RL_Real::RunHighLevel, this));
     this->loop_udpRecv->start();
     this->loop_keyboard->start();
     this->loop_control->start();
     this->loop_rl->start();
+#if defined(USE_ROS2)
+    this->loop_vision->start();
+#endif
     this->loop_navi->start();
 
 #ifdef PLOT
@@ -245,6 +252,9 @@ RL_Real::~RL_Real()
     this->loop_keyboard->shutdown();
     this->loop_control->shutdown();
     this->loop_rl->shutdown();
+#if defined(USE_ROS2)
+    this->loop_vision->shutdown();
+#endif
     this->loop_navi->shutdown();
     this->gamepad_ptr_->StopDataThread();
 #ifdef PLOT
@@ -890,37 +900,41 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
 
 void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    using SteadyClock = std::chrono::steady_clock;
-    const double target_period_s = (this->nav_dt_ > 0.0) ? this->nav_dt_ : 0.1;
-    static bool depth_rate_gate_inited = false;
-    static SteadyClock::time_point depth_last_accept_tp;
+    std::lock_guard<std::mutex> lock(this->depth_raw_msg_mutex_);
+    this->depth_raw_latest_msg_ = msg;
+}
 
-    const auto now_tp = SteadyClock::now();
-    if (depth_rate_gate_inited)
+void RL_Real::RunVision()
+{
+    using SteadyClock = std::chrono::steady_clock;
+    sensor_msgs::msg::Image::SharedPtr latest_msg;
     {
-        const double elapsed_s = std::chrono::duration<double>(now_tp - depth_last_accept_tp).count();
-        if (elapsed_s < target_period_s)
-        {
-            return;
-        }
+        std::lock_guard<std::mutex> lock(this->depth_raw_msg_mutex_);
+        latest_msg = this->depth_raw_latest_msg_;
     }
-    depth_last_accept_tp = now_tp;
-    depth_rate_gate_inited = true;
+
+    if (!latest_msg)
+    {
+        return;
+    }
 
     const auto proc_begin_tp = SteadyClock::now();
     torch::Tensor processed_depth = depth_buffer.process_depth_image(
-        msg,
+        latest_msg,
         this->processed_depth_publisher,
         this->processed_depth_norm_publisher);
-    // processed_depth shape: [30, 43], insert函数会处理batch维度
-    depth_buffer.insert(processed_depth);
+    {
+        std::lock_guard<std::mutex> lock(this->depth_buffer_mutex_);
+        // processed_depth shape: [30, 43], insert函数会处理batch维度
+        depth_buffer.insert(processed_depth);
+    }
     const double proc_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - proc_begin_tp).count();
 
     const bool first_depth_frame = !g_depth_frame_received.exchange(true);
     if (first_depth_frame)
     {
         std::cout << LOGGER::INFO
-                  << "[NAV][DEPTH] first processed depth frame received on /camera/depth/image_rect_raw"
+                  << "[NAV][DEPTH] first processed depth frame ready from loop_vision (source=/camera/depth/image_rect_raw)"
                   << std::endl;
     }
 
@@ -949,7 +963,7 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
             depth_samples > 0)
         {
             const double avg_ms = depth_sum_ms / static_cast<double>(depth_samples);
-            const double target_hz = (target_period_s > 0.0) ? (1.0 / target_period_s) : 10.0;
+            const double target_hz = (this->nav_dt_ > 0.0) ? (1.0 / this->nav_dt_) : 10.0;
             std::ostringstream oss;
             oss << std::fixed << std::setprecision(2)
                 << "[NAV][DBG][DEPTH] samples=" << depth_samples
@@ -1665,7 +1679,11 @@ void RL_Real::RunHighLevel()
     {
         this->DisableNavigationWithError("vision_input", "no processed depth received yet on /camera/depth/image_rect_raw");
     }
-    torch::Tensor depth = depth_buffer.get_depth_vec();
+    torch::Tensor depth;
+    {
+        std::lock_guard<std::mutex> lock(this->depth_buffer_mutex_);
+        depth = depth_buffer.get_depth_vec();
+    }
     if (!depth.defined())
     {
         this->DisableNavigationWithError("vision_input", "depth tensor is undefined");

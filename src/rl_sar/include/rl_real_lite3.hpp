@@ -73,6 +73,7 @@ private:
     std::shared_ptr<LoopFunc> loop_udpRecv;
     std::shared_ptr<LoopFunc> loop_rl;
     std::shared_ptr<LoopFunc> loop_navi;
+    std::shared_ptr<LoopFunc> loop_vision;
     std::shared_ptr<LoopFunc> loop_plot;
 
     // plot
@@ -181,6 +182,10 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_publisher;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_depth_norm_publisher;
     void DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
+    void RunVision();
+    std::mutex depth_raw_msg_mutex_;
+    sensor_msgs::msg::Image::SharedPtr depth_raw_latest_msg_;
+    std::mutex depth_buffer_mutex_;
 
     // nav interface
     rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr nav_goal_body_subscriber;
