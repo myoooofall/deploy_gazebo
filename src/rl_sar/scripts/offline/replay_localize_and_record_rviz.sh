@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
+
+set +u
+if [[ -f "/opt/ros/humble/setup.bash" ]]; then
+  # shellcheck disable=SC1091
+  source /opt/ros/humble/setup.bash
+fi
+if [[ -f "${WORKSPACE_DIR}/lite_cog_ros2/nav/install/setup.bash" ]]; then
+  # shellcheck disable=SC1091
+  source "${WORKSPACE_DIR}/lite_cog_ros2/nav/install/setup.bash"
+fi
+if [[ -f "${WORKSPACE_DIR}/install/setup.bash" ]]; then
+  # shellcheck disable=SC1091
+  source "${WORKSPACE_DIR}/install/setup.bash"
+fi
+set -u
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <bag_dir> [map_yaml] [map_pcd]"
@@ -40,7 +58,7 @@ LOCALIZATION_CMD="ros2 launch hdl_localization lite_localization.launch.py \
   map_server_config_file:=${MAP_YAML} \
   use_sim_time:=true \
   map_path:=${MAP_PCD} \
-  publish_base2lidar_tf:=true"
+  publish_base2lidar_tf:=false"
 
 export LOCALIZATION_CMD
 # Force non-paused playback in this wrapper to avoid stale env vars
@@ -49,5 +67,4 @@ export PLAY_START_PAUSED=0
 export PLAY_BEFORE_NODES=0
 echo "[offline-replay] playback mode: PLAY_START_PAUSED=${PLAY_START_PAUSED}, PLAY_BEFORE_NODES=${PLAY_BEFORE_NODES}, PLAY_RATE=${PLAY_RATE:-1.0}, PLAY_LOOP=${PLAY_LOOP:-0}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "${SCRIPT_DIR}/replay_localize_and_record.sh" "${BAG_DIR}"
