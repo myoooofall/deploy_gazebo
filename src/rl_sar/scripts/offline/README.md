@@ -83,6 +83,26 @@ Generated files:
 - `goal_error_offline_odom.csv`
 - `summary.txt`
 
+## 5) Export depth topic to MP4 (no ffmpeg required)
+
+```bash
+cd ~/liangwang_ws/rl_sar_new/rl_sar/src/rl_sar/scripts/offline
+./export_depth_video_from_bag.py \
+  ~/liangwang_ws/rl_sar_new/bag/3_25/run_20260401_170924 \
+  --topic /camera/depth/processed_norm \
+  --out ~/liangwang_ws/rl_sar_new/bag/3_25/run_20260401_170924/depth_processed_norm.mp4
+```
+
+Notes:
+- Default mode is `--mode direct` (reads bag file directly), which avoids ROS QoS/playback issues.
+- `processed_norm` usually looks better directly for preview videos.
+- If you want raw depth, switch topic to `/camera/depth/processed`.
+- Use `--colormap none` for grayscale, or keep default `turbo` for heatmap style.
+- Optional fallback playback mode:
+  - `--mode play`
+- In `--mode play`, optional QoS override:
+  - `--qos-overrides-path ./qos_overrides.yaml`
+
 ## Notes
 
 - `rl_real_lite3` now falls back to publishing **body-frame goal values on existing goal topics** when `/Odometry` is unavailable.
