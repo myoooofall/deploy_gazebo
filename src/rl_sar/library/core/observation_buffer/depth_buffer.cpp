@@ -158,7 +158,7 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     const float raw_depth_mean_m = depth_tensor.mean().item<float>();
 
     // 归一化到[-1, 0]范围 (用于推理)
-    depth_tensor = depth_tensor / 5 - 1;
+    depth_tensor = depth_tensor / 5 - 0.5;
     depth_tensor = torch::nn::functional::avg_pool2d(
         depth_tensor.unsqueeze(0).unsqueeze(0),
         torch::nn::functional::AvgPool2dFuncOptions({2, 2}).stride({2, 2})

@@ -1391,9 +1391,9 @@ bool RL_Real::InitHierarchicalNav()
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
-    const int hf_dim = 1 + 3 + 3 + dof + dof + dof - 12;
-    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
-    const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof - 15;
+    const int hf_dim = 1 + 3 + 3 + dof + dof + dof ;
+    const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof ;
+    const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof ;
 
     this->nav_highfreq_buf_ = ObservationBuffer(1, {hf_dim}, this->nav_highfreq_hist_len_, "time");
     this->nav_obs_hist_buf_ = ObservationBuffer(1, {obs_dim}, this->nav_obs_hist_len_, "time");
@@ -1460,7 +1460,19 @@ void RL_Real::UpdateHighFrequencyObs()
     torch::Tensor dof_pos_term = (dof_pos - this->params.default_dof_pos) * static_cast<float>(this->params.dof_pos_scale);
     torch::Tensor dof_vel_term = dof_vel * static_cast<float>(this->params.dof_vel_scale);
 
-    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term}, 1);
+    torch::Tensor actions = torch::zeros({1, dof}, torch::dtype(torch::kFloat32));
+    {
+        std::lock_guard<std::mutex> lock(this->nav_last_actions_mutex_);
+        if (static_cast<int>(this->nav_last_actions_.size()) == dof)
+        {
+            for (int i = 0; i < dof; ++i)
+            {
+                actions[0][i] = this->nav_last_actions_[i];
+            }
+        }
+    }
+
+    torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions}, 1);
 
     if (hf_debug_active && hf_obs_debug_count < 10)
     {
@@ -1474,6 +1486,7 @@ void RL_Real::UpdateHighFrequencyObs()
             << " projected_gravity=" << TensorFlatToString(projected_gravity, -1, 6)
             << " dof_pos_term=" << TensorFlatToString(dof_pos_term, -1, 6)
             << " dof_vel_term=" << TensorFlatToString(dof_vel_term, -1, 6)
+            << " actions=" << TensorFlatToString(actions, -1, 6)
             << " hf_shape=" << TensorShapeToString(hf);
         std::cout << LOGGER::INFO << oss.str() << std::endl;
     }
@@ -1616,24 +1629,35 @@ void RL_Real::RunHighLevel()
             }
         }
     }
+    torch::Tensor prev_high_command = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
+    if (this->nav_high_command_.defined() && this->nav_high_command_.numel() >= 3)
+    {
+        prev_high_command = this->nav_high_command_.to(torch::kFloat32);
+    }
+    torch::Tensor prev_high_command_scaled =
+        prev_high_command * this->params.commands_scale.to(torch::kFloat32);
     torch::Tensor obs_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
         timer_tensor,
+        prev_high_command_scaled,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
+        actions,
     }, 1);
 
     torch::Tensor obs_io_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
         time_io_tensor,
+        prev_high_command_scaled,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
+        actions,
     }, 1);
 
     torch::Tensor obs_io_frame_hf = torch::cat({
@@ -1642,6 +1666,7 @@ void RL_Real::RunHighLevel()
         projected_gravity,
         dof_pos_term,
         dof_vel_term,
+        actions,
     }, 1);
 
     if (new_goal)
@@ -1722,6 +1747,8 @@ void RL_Real::RunHighLevel()
             << " spawn_init=" << TensorFlatToString(this->nav_spawn_positions_body_initial_)
             << " timer=" << TensorFlatToString(timer_tensor)
             << " time_io=" << TensorFlatToString(time_io_tensor)
+            << " prev_high_command=" << TensorFlatToString(prev_high_command)
+            << " prev_high_command_scaled=" << TensorFlatToString(prev_high_command_scaled)
             << " base_ang_vel=" << TensorFlatToString(base_ang_vel)
             << " projected_gravity=" << TensorFlatToString(projected_gravity)
             << " dof_pos_term=" << TensorFlatToString(dof_pos_term)

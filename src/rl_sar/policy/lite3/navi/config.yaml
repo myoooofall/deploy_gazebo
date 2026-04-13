@@ -6,17 +6,17 @@ lite3/navi:
   high_model_name: "backbone_1.pt"
   vision_model_name: "head_1.pt"
   nav_dt: 0.1
-  nav_episode_length_s: 45.0
+  nav_episode_length_s: 60.0
   goal_stop_radius: 0.5
   # Training-aligned command shaping (same names as LeggedGym config):
   # source -> LPF(alpha) -> step limit -> clip
-  high_command_filter_alpha: 0.8
-  high_command_max_step_lin_x: 0.1
-  high_command_max_step_lin_y: 0.05
-  high_command_max_step_yaw: 0.12
+  high_command_filter_alpha: 0.6
+  high_command_max_step_lin_x: 0.4
+  high_command_max_step_lin_y: 0.25
+  high_command_max_step_yaw: 0.4
   clip_commands_vx: 1.0
   clip_commands_vy: 0.5
-  clip_commands_w: 0.6
+  clip_commands_w: 1.0
   watchdog_timeout_ms: 3000
   perf_log_enable: true
   perf_log_interval_s: 1.0
