@@ -22,6 +22,14 @@ lite3/navi:
   perf_log_interval_s: 1.0
   debug_enable: True
   debug_log_interval_s: 1.0
+  # Structured semantic observation logger (CSV): enabled during navigation.
+  # Default path is <rl_sar>/logs/nav_obs when obs_log_dir is empty.
+  obs_log_enable: true
+  obs_log_interval_s: 0.1
+  obs_log_dir: ""
+  # Lite3 SDK reports angular_velocity_{roll,pitch,yaw}; interpret as Euler rates
+  # and convert to body angular velocity before policy input.
+  sdk_gyro_is_euler_rate: true
   vision_channels: 8
   momentum_factor: 0.95
   num_observations: 45

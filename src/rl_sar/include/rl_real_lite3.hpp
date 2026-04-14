@@ -21,7 +21,6 @@
 #include "robot_types.h"
 #include <cmath>
 #include <atomic>
-#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -104,6 +103,25 @@ private:
     void RunHighLevel();
     bool InitHierarchicalNav();
     void UpdateHighFrequencyObs();
+    void StartNavObsLogIfNeeded(uint64_t goal_seq);
+    void StopNavObsLogIfNeeded();
+    void WriteNavObsSemanticLog(
+        uint64_t goal_seq,
+        bool new_goal,
+        double time_io,
+        double timer_norm,
+        const torch::Tensor &goal_init_body,
+        const torch::Tensor &pred_target_body,
+        const torch::Tensor &cmd_raw,
+        const torch::Tensor &cmd_filtered,
+        const torch::Tensor &prev_high_cmd_scaled,
+        const torch::Tensor &base_ang_vel_scaled,
+        const torch::Tensor &projected_gravity,
+        const torch::Tensor &dof_pos_raw,
+        const torch::Tensor &dof_pos_term,
+        const torch::Tensor &dof_vel_raw,
+        const torch::Tensor &dof_vel_term,
+        const torch::Tensor &actions);
     double GetNavEpisodeElapsedSec() const;
     void ResetNavEpisodeClock();
     void ResetNavModelStates();
@@ -158,6 +176,18 @@ private:
     double nav_perf_log_interval_s_ = 1.0;
     bool nav_debug_enable_ = false;      // extra debug timing logs
     double nav_debug_log_interval_s_ = 1.0;
+    bool nav_obs_log_enable_ = false;    // structured semantic-observation csv logger (for sim-vs-real comparison)
+    double nav_obs_log_interval_s_ = 0.1;
+    std::string nav_obs_log_dir_;
+    std::string nav_obs_log_path_;
+    std::ofstream nav_obs_log_stream_;
+    bool nav_obs_log_active_ = false;
+    uint64_t nav_obs_log_goal_seq_ = 0;
+    double nav_obs_log_last_time_io_ = -1.0;
+    // Lite3 SDK IMU angular_velocity_* fields are named as roll/pitch/yaw rates.
+    // When true, interpret them as Euler angle rates and convert to body-frame
+    // angular velocity [wx, wy, wz] before feeding policies.
+    bool nav_sdk_gyro_is_euler_rate_ = true;
 
     std::mutex nav_highfreq_mutex_;
     std::mutex nav_state_mutex_;
