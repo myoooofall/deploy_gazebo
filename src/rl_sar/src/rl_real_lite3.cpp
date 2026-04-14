@@ -5,6 +5,7 @@
 
 #include "rl_real_lite3.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <limits>
@@ -938,45 +939,7 @@ void RL_Real::RunVision()
                   << std::endl;
     }
 
-    if (this->nav_debug_enable_)
-    {
-        static bool depth_perf_inited = false;
-        static SteadyClock::time_point depth_last_report_tp;
-        static double depth_sum_ms = 0.0;
-        static double depth_max_ms = 0.0;
-        static uint64_t depth_samples = 0;
-
-        if (!depth_perf_inited)
-        {
-            depth_last_report_tp = SteadyClock::now();
-            depth_perf_inited = true;
-        }
-        depth_sum_ms += proc_ms;
-        if (proc_ms > depth_max_ms) depth_max_ms = proc_ms;
-        depth_samples += 1;
-
-        const auto report_tp = SteadyClock::now();
-        const double interval_s = (this->nav_debug_log_interval_s_ > 0.0)
-                                      ? this->nav_debug_log_interval_s_
-                                      : 1.0;
-        if (std::chrono::duration<double>(report_tp - depth_last_report_tp).count() >= interval_s &&
-            depth_samples > 0)
-        {
-            const double avg_ms = depth_sum_ms / static_cast<double>(depth_samples);
-            const double target_hz = (this->nav_dt_ > 0.0) ? (1.0 / this->nav_dt_) : 10.0;
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2)
-                << "[NAV][DBG][DEPTH] samples=" << depth_samples
-                << " depth_ms(avg/max)=[" << avg_ms << "/" << depth_max_ms << "]"
-                << " target_hz=" << target_hz;
-            std::cout << LOGGER::INFO << oss.str() << std::endl;
-
-            depth_sum_ms = 0.0;
-            depth_max_ms = 0.0;
-            depth_samples = 0;
-            depth_last_report_tp = report_tp;
-        }
-    }
+    (void)proc_ms;
 }
 
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
@@ -1254,6 +1217,176 @@ void RL_Real::PublishNavGoalComparison(
 }
 #endif
 
+double RL_Real::GetNavEpisodeElapsedSec() const
+{
+    using SteadyClock = std::chrono::steady_clock;
+    const int64_t start_ns = this->nav_episode_start_ns_.load(std::memory_order_relaxed);
+    if (start_ns == 0)
+    {
+        return 0.0;
+    }
+
+    const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now().time_since_epoch()).count();
+    return std::max(0.0, static_cast<double>(now_ns - start_ns) * 1e-9);
+}
+
+void RL_Real::ResetNavEpisodeClock()
+{
+    using SteadyClock = std::chrono::steady_clock;
+    const int64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now().time_since_epoch()).count();
+    this->nav_episode_start_ns_.store(start_ns, std::memory_order_relaxed);
+    this->nav_time_io_.store(0.0);
+    this->nav_time_io_hf_.store(0.0);
+}
+
+void RL_Real::ResetNavModelStates()
+{
+    try
+    {
+        this->nav_high_model_.get_method("reset_memory")({});
+    }
+    catch (const c10::Error &e)
+    {
+        this->DisableNavigationWithError(
+            "model_reset",
+            std::string("nav_high_model.reset_memory() failed: ") + e.what());
+    }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError(
+            "model_reset",
+            std::string("nav_high_model.reset_memory() failed: ") + e.what());
+    }
+}
+
+void RL_Real::WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim)
+{
+    torch::NoGradGuard no_grad;
+    const auto opts = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor vision_input = torch::zeros({1, this->nav_vision_channels_, 30, 43}, opts);
+    torch::Tensor obs_frame = torch::zeros({1, obs_dim}, opts);
+    torch::Tensor obs_io_hist = torch::zeros({1, obs_io_dim * this->nav_obs_io_hist_len_}, opts);
+    torch::Tensor hf_hist = torch::zeros({1, hf_dim * this->nav_highfreq_hist_len_}, opts);
+
+    const int warmup_iters = 20;
+    for (int i = 0; i < warmup_iters; ++i)
+    {
+        const auto warmup_begin_tp = std::chrono::steady_clock::now();
+        torch::Tensor vision_feat = this->nav_vision_model_.forward({vision_input}).toTensor();
+        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
+        (void)this->nav_high_model_.forward(inputs);
+        const double warmup_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - warmup_begin_tp).count();
+        std::cout << LOGGER::INFO
+                  << "[NAV][INIT] warmup " << (i + 1) << "/" << warmup_iters
+                  << " took " << std::fixed << std::setprecision(2) << warmup_ms << " ms"
+                  << std::endl;
+    }
+
+    this->ResetNavModelStates();
+    this->nav_high_command_.zero_();
+    this->nav_cmd_x_.store(0.0);
+    this->nav_cmd_y_.store(0.0);
+    this->nav_cmd_yaw_.store(0.0);
+    this->nav_hl_beat_seq_.store(0);
+    this->nav_timer_left_.store(this->nav_episode_length_s_);
+    this->nav_episode_start_ns_.store(0, std::memory_order_relaxed);
+    this->nav_time_io_.store(0.0);
+    this->nav_time_io_hf_.store(0.0);
+    {
+        std::lock_guard<std::mutex> lock(this->nav_last_actions_mutex_);
+        std::fill(this->nav_last_actions_.begin(), this->nav_last_actions_.end(), 0.0f);
+    }
+    this->nav_runtime_prime_done_.store(false);
+}
+
+void RL_Real::PrimeNavRuntimeOnce()
+{
+    if (this->nav_runtime_prime_done_.load())
+    {
+        return;
+    }
+    if (!g_depth_frame_received.load())
+    {
+        return;
+    }
+    if (this->nav_obs_dim_ <= 0 || this->nav_obs_io_dim_ <= 0 || this->nav_hf_dim_ <= 0)
+    {
+        return;
+    }
+
+    torch::Tensor depth;
+    {
+        std::lock_guard<std::mutex> lock(this->depth_buffer_mutex_);
+        depth = depth_buffer.get_depth_vec();
+    }
+    if (!depth.defined())
+    {
+        return;
+    }
+    depth = depth.to(torch::kFloat32);
+    if (depth.dim() != 4)
+    {
+        return;
+    }
+    const int64_t channels = depth.size(1);
+    if (channels != static_cast<int64_t>(this->nav_vision_channels_))
+    {
+        return;
+    }
+
+    try
+    {
+        torch::NoGradGuard no_grad;
+        torch::InferenceMode infer_mode;
+        const auto opts = torch::TensorOptions().dtype(torch::kFloat32);
+        const torch::Tensor obs_frame = torch::zeros({1, this->nav_obs_dim_}, opts);
+        const torch::Tensor obs_io_hist = torch::zeros({1, this->nav_obs_io_dim_ * this->nav_obs_io_hist_len_}, opts);
+        const torch::Tensor hf_hist = torch::zeros({1, this->nav_hf_dim_ * this->nav_highfreq_hist_len_}, opts);
+
+        const auto begin_tp = std::chrono::steady_clock::now();
+        const auto vision_begin_tp = std::chrono::steady_clock::now();
+        // Experiment mode: force vision input to all-zero tensor to isolate
+        // whether depth quality is the root cause of navigation instability.
+        torch::Tensor depth_for_model = torch::zeros_like(depth);
+        torch::Tensor vision_feat = this->nav_vision_model_.forward({depth_for_model}).toTensor();
+        const double vision_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - vision_begin_tp).count();
+
+        const auto high_begin_tp = std::chrono::steady_clock::now();
+        std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
+        (void)this->nav_high_model_.forward(inputs);
+        const double high_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - high_begin_tp).count();
+        const double total_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - begin_tp).count();
+
+        this->ResetNavModelStates();
+        this->nav_runtime_prime_done_.store(true);
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2)
+            << "[NAV][INIT] runtime-prime done total_ms=" << total_ms
+            << " vision_ms=" << vision_ms
+            << " high_ms=" << high_ms;
+        std::cout << LOGGER::INFO << oss.str() << std::endl;
+    }
+    catch (const c10::Error &e)
+    {
+        this->DisableNavigationWithError(
+            "runtime_prime",
+            std::string("runtime prime failed: ") + e.what());
+    }
+    catch (const std::exception &e)
+    {
+        this->DisableNavigationWithError(
+            "runtime_prime",
+            std::string("runtime prime failed: ") + e.what());
+    }
+}
+
 bool RL_Real::InitHierarchicalNav()
 {
     const std::string robot = this->robot_name.empty() ? "go2" : this->robot_name;
@@ -1378,6 +1511,7 @@ bool RL_Real::InitHierarchicalNav()
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
+    this->nav_episode_start_ns_.store(0, std::memory_order_relaxed);
     this->nav_time_io_.store(0.0);
     this->nav_time_io_hf_.store(0.0);
 
@@ -1394,6 +1528,10 @@ bool RL_Real::InitHierarchicalNav()
     const int hf_dim = 1 + 3 + 3 + dof + dof + dof ;
     const int obs_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof ;
     const int obs_io_dim = 3 + 3 + 3 + 1 + 3 + 3 + dof + dof + dof ;
+    this->nav_hf_dim_ = hf_dim;
+    this->nav_obs_dim_ = obs_dim;
+    this->nav_obs_io_dim_ = obs_io_dim;
+    this->nav_runtime_prime_done_.store(false);
 
     this->nav_highfreq_buf_ = ObservationBuffer(1, {hf_dim}, this->nav_highfreq_hist_len_, "time");
     this->nav_obs_hist_buf_ = ObservationBuffer(1, {obs_dim}, this->nav_obs_hist_len_, "time");
@@ -1404,39 +1542,14 @@ bool RL_Real::InitHierarchicalNav()
     this->nav_high_command_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
     this->nav_last_actions_ = std::vector<float>(dof, 0.0f);
 
+    this->WarmupNavModels(obs_dim, obs_io_dim, hf_dim);
+
     return true;
 }
 
 void RL_Real::UpdateHighFrequencyObs()
 {
-    static int hf_obs_debug_count = 0;
-    static bool hf_obs_debug_prev_active = false;
-    static uint64_t hf_obs_debug_goal_seq = 0;
-
-    const uint64_t goal_seq_now = this->nav_goal_seq_.load();
-    const uint64_t active_goal_seq_now = this->nav_active_goal_seq_.load();
-    const bool goal_consumed_by_high_level =
-        (goal_seq_now > 0) && (goal_seq_now == active_goal_seq_now);
-    const bool hf_debug_active =
-        this->nav_enabled_.load() && this->rl_init_done && goal_consumed_by_high_level;
-
-    if (!hf_debug_active)
-    {
-        hf_obs_debug_count = 0;
-        hf_obs_debug_prev_active = false;
-        hf_obs_debug_goal_seq = active_goal_seq_now;
-    }
-    else
-    {
-        if (!hf_obs_debug_prev_active || active_goal_seq_now != hf_obs_debug_goal_seq)
-        {
-            hf_obs_debug_count = 0;
-            hf_obs_debug_goal_seq = active_goal_seq_now;
-        }
-        hf_obs_debug_prev_active = true;
-    }
-
-    const double t = this->nav_time_io_hf_.load() + this->params.dt;
+    const double t = this->GetNavEpisodeElapsedSec();
     this->nav_time_io_hf_.store(t);
 
     const int dof = this->params.num_of_dofs;
@@ -1474,23 +1587,6 @@ void RL_Real::UpdateHighFrequencyObs()
 
     torch::Tensor hf = torch::cat({time_io, base_ang_vel, projected_gravity, dof_pos_term, dof_vel_term, actions}, 1);
 
-    if (hf_debug_active && hf_obs_debug_count < 10)
-    {
-        hf_obs_debug_count++;
-        std::ostringstream oss;
-        oss << "[NAV][DBG][HF][" << hf_obs_debug_count << "/10] "
-            << "goal_seq=" << goal_seq_now
-            << " active_goal_seq=" << active_goal_seq_now
-            << " time_io=" << TensorFlatToString(time_io, -1, 6)
-            << " base_ang_vel=" << TensorFlatToString(base_ang_vel, -1, 6)
-            << " projected_gravity=" << TensorFlatToString(projected_gravity, -1, 6)
-            << " dof_pos_term=" << TensorFlatToString(dof_pos_term, -1, 6)
-            << " dof_vel_term=" << TensorFlatToString(dof_vel_term, -1, 6)
-            << " actions=" << TensorFlatToString(actions, -1, 6)
-            << " hf_shape=" << TensorShapeToString(hf);
-        std::cout << LOGGER::INFO << oss.str() << std::endl;
-    }
-
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(hf);
@@ -1500,7 +1596,6 @@ void RL_Real::UpdateHighFrequencyObs()
 void RL_Real::RunHighLevel()
 {
     using SteadyClock = std::chrono::steady_clock;
-    static int obs_debug_count = 0;
     static bool perf_inited = false;
     static SteadyClock::time_point perf_last_report_tp;
     static double perf_sum_vision_ms = 0.0;
@@ -1508,15 +1603,9 @@ void RL_Real::RunHighLevel()
     static double perf_max_vision_ms = 0.0;
     static double perf_max_high_ms = 0.0;
     static uint64_t perf_samples = 0;
-    static bool debug_inited = false;
-    static SteadyClock::time_point debug_last_report_tp;
-    static double debug_sum_total_ms = 0.0;
-    static double debug_max_total_ms = 0.0;
-    static double debug_sum_vision_ms = 0.0;
-    static double debug_max_vision_ms = 0.0;
-    static double debug_sum_high_ms = 0.0;
-    static double debug_max_high_ms = 0.0;
-    static uint64_t debug_samples = 0;
+    static uint64_t timeio_check_goal_seq = 0;
+    static int timeio_check_count = 0;
+    this->PrimeNavRuntimeOnce();
 
     if (!this->nav_enabled_.load())
     {
@@ -1561,7 +1650,6 @@ void RL_Real::RunHighLevel()
         return;
     }
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
-    const auto hl_begin_tp = SteadyClock::now();
 
     const double goal_body_x_initial = this->nav_goal_body_x_.load();
     const double goal_body_y_initial = this->nav_goal_body_y_.load();
@@ -1569,10 +1657,9 @@ void RL_Real::RunHighLevel()
 
     if (new_goal)
     {
+        this->ResetNavEpisodeClock();
         this->nav_active_goal_seq_.store(goal_seq);
         this->nav_timer_left_.store(this->nav_episode_length_s_);
-        this->nav_time_io_.store(0.0);
-        this->nav_time_io_hf_.store(0.0);
         this->nav_hl_beat_seq_.store(0);
         this->nav_high_command_.zero_();
         this->nav_cmd_x_.store(0.0);
@@ -1589,7 +1676,8 @@ void RL_Real::RunHighLevel()
 
     const double timer_left = this->nav_timer_left_.load();
     const double timer_norm = std::max(0.0, timer_left) / std::max(1e-6, this->nav_episode_length_s_);
-    const double time_io = this->nav_time_io_.load();
+    const double time_io = this->GetNavEpisodeElapsedSec();
+    this->nav_time_io_.store(time_io);
 
     torch::Tensor timer_tensor = torch::tensor({{static_cast<float>(timer_norm)}});
     torch::Tensor time_io_tensor = torch::tensor({{static_cast<float>(time_io)}});
@@ -1639,8 +1727,8 @@ void RL_Real::RunHighLevel()
     torch::Tensor obs_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
-        timer_tensor,
         prev_high_command_scaled,
+        timer_tensor,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
@@ -1651,8 +1739,8 @@ void RL_Real::RunHighLevel()
     torch::Tensor obs_io_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
-        time_io_tensor,
         prev_high_command_scaled,
+        time_io_tensor,
         base_ang_vel,
         projected_gravity,
         dof_pos_term,
@@ -1684,6 +1772,13 @@ void RL_Real::RunHighLevel()
         this->nav_obs_io_hist_buf_.insert(obs_io_frame);
     }
 
+    // Align HF timeline with current nav tick: append one fresh HF sample
+    // right before reading hf_hist in loop_nav.
+    {
+        std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
+        this->UpdateHighFrequencyObs();
+    }
+
     std::vector<int> obs_ids_10;
     obs_ids_10.reserve(this->nav_obs_hist_len_);
     for (int i = this->nav_obs_hist_len_ - 1; i >= 0; --i)
@@ -1702,6 +1797,45 @@ void RL_Real::RunHighLevel()
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         hf_hist = this->nav_highfreq_buf_.get_obs_vec(obs_ids_20);
+    }
+
+    if (new_goal || goal_seq != timeio_check_goal_seq)
+    {
+        timeio_check_goal_seq = goal_seq;
+        timeio_check_count = 0;
+    }
+    if (timeio_check_count < 3)
+    {
+        timeio_check_count++;
+        const double time_io_hf_now = this->nav_time_io_hf_.load();
+        const int64_t obs_io_dim = obs_io_frame.size(1);
+        const int64_t hf_dim = obs_io_frame_hf.size(1);
+        const double obs_io_hist_latest_time =
+            (obs_io_hist.defined() && obs_io_hist.numel() >= obs_io_dim + 7)
+                ? obs_io_hist[0][obs_io_dim * (this->nav_obs_io_hist_len_ - 1) + 6].item<double>()
+                : std::numeric_limits<double>::quiet_NaN();
+        const double hf_hist_oldest_time =
+            (hf_hist.defined() && hf_hist.numel() >= hf_dim)
+                ? hf_hist[0][0].item<double>()
+                : std::numeric_limits<double>::quiet_NaN();
+        const double hf_hist_latest_time =
+            (hf_hist.defined() && hf_hist.numel() >= hf_dim * this->nav_highfreq_hist_len_)
+                ? hf_hist[0][hf_dim * (this->nav_highfreq_hist_len_ - 1)].item<double>()
+                : std::numeric_limits<double>::quiet_NaN();
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(4)
+            << "[NAV][CHK][TIMEIO][" << timeio_check_count << "/3]"
+            << " goal_seq=" << goal_seq
+            << " new_goal=" << (new_goal ? 1 : 0)
+            << " time_io=" << time_io
+            << " time_io_hf_now=" << time_io_hf_now
+            << " obs_io_hist_latest_time=" << obs_io_hist_latest_time
+            << " hf_hist_oldest_time=" << hf_hist_oldest_time
+            << " hf_hist_latest_time=" << hf_hist_latest_time
+            << " hf_minus_lf_now=" << (time_io_hf_now - time_io)
+            << " hf_hist_latest_minus_lf=" << (hf_hist_latest_time - time_io);
+        std::cout << LOGGER::INFO << oss.str() << std::endl;
     }
 
     torch::Tensor vision_feat;
@@ -1735,31 +1869,11 @@ void RL_Real::RunHighLevel()
             << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
         this->DisableNavigationWithError("vision_input", oss.str());
     }
-    vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+    // Experiment mode: force vision input to all-zero tensor to isolate
+    // whether depth quality is the root cause of navigation instability.
+    torch::Tensor depth_for_model = torch::zeros_like(depth);
+    vision_feat = this->nav_vision_model_.forward({depth_for_model}).toTensor();
     const double vision_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - vision_begin_tp).count();
-
-    if (obs_debug_count < 10)
-    {
-        obs_debug_count++;
-        std::ostringstream oss;
-        oss << "[NAV][DBG][OBS][" << obs_debug_count << "/10] "
-            << "goal_init=" << TensorFlatToString(this->nav_position_targets_body_initial_)
-            << " spawn_init=" << TensorFlatToString(this->nav_spawn_positions_body_initial_)
-            << " timer=" << TensorFlatToString(timer_tensor)
-            << " time_io=" << TensorFlatToString(time_io_tensor)
-            << " prev_high_command=" << TensorFlatToString(prev_high_command)
-            << " prev_high_command_scaled=" << TensorFlatToString(prev_high_command_scaled)
-            << " base_ang_vel=" << TensorFlatToString(base_ang_vel)
-            << " projected_gravity=" << TensorFlatToString(projected_gravity)
-            << " dof_pos_term=" << TensorFlatToString(dof_pos_term)
-            << " dof_vel_term=" << TensorFlatToString(dof_vel_term)
-            << " obs_frame_shape=" << TensorShapeToString(obs_frame)
-            << " obs_io_frame_shape=" << TensorShapeToString(obs_io_frame)
-            << " obs_io_frame_hf_shape=" << TensorShapeToString(obs_io_frame_hf)
-            << " vision_feat_shape=" << TensorShapeToString(vision_feat)
-            << " vision_feat_sample=" << TensorFlatToString(vision_feat, 16);
-        std::cout << LOGGER::INFO << oss.str() << std::endl;
-    }
 
     torch::Tensor cmd;
     torch::Tensor pred_target_body;
@@ -1950,7 +2064,10 @@ void RL_Real::RunHighLevel()
     this->nav_cmd_x_.store(cmd[0][0].item<double>());
     this->nav_cmd_y_.store(cmd[0][1].item<double>());
     this->nav_cmd_yaw_.store(cmd[0][2].item<double>());
-    this->nav_high_command_ = cmd.to(torch::kFloat32);
+    {
+        c10::InferenceMode normal_mode(false);
+        this->nav_high_command_ = cmd.to(torch::kFloat32).clone();
+    }
     this->nav_hl_beat_seq_.fetch_add(1);
 #if defined(USE_ROS2)
     // Debug output: raw high-level command (before filter/step-limit/clip), aligned with training source_command.
@@ -1965,52 +2082,7 @@ void RL_Real::RunHighLevel()
 #endif
 
     this->nav_timer_left_.store(std::max(0.0, timer_left - this->nav_dt_));
-    this->nav_time_io_.store(time_io + this->nav_dt_);
 
-    if (this->nav_debug_enable_)
-    {
-        const double total_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - hl_begin_tp).count();
-        if (!debug_inited)
-        {
-            debug_last_report_tp = SteadyClock::now();
-            debug_inited = true;
-        }
-        debug_sum_total_ms += total_ms;
-        if (total_ms > debug_max_total_ms) debug_max_total_ms = total_ms;
-        debug_sum_vision_ms += vision_ms;
-        if (vision_ms > debug_max_vision_ms) debug_max_vision_ms = vision_ms;
-        debug_sum_high_ms += high_ms;
-        if (high_ms > debug_max_high_ms) debug_max_high_ms = high_ms;
-        debug_samples += 1;
-
-        const auto now_tp = SteadyClock::now();
-        const double interval_s = (this->nav_debug_log_interval_s_ > 0.0)
-                                      ? this->nav_debug_log_interval_s_
-                                      : 1.0;
-        if (std::chrono::duration<double>(now_tp - debug_last_report_tp).count() >= interval_s &&
-            debug_samples > 0)
-        {
-            const double avg_total_ms = debug_sum_total_ms / static_cast<double>(debug_samples);
-            const double avg_vision_ms = debug_sum_vision_ms / static_cast<double>(debug_samples);
-            const double avg_high_ms = debug_sum_high_ms / static_cast<double>(debug_samples);
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2)
-                << "[NAV][DBG][HL] samples=" << debug_samples
-                << " total_ms(avg/max)=[" << avg_total_ms << "/" << debug_max_total_ms << "]"
-                << " vision_ms(avg/max)=[" << avg_vision_ms << "/" << debug_max_vision_ms << "]"
-                << " high_ms(avg/max)=[" << avg_high_ms << "/" << debug_max_high_ms << "]";
-            std::cout << LOGGER::INFO << oss.str() << std::endl;
-
-            debug_sum_total_ms = 0.0;
-            debug_max_total_ms = 0.0;
-            debug_sum_vision_ms = 0.0;
-            debug_max_vision_ms = 0.0;
-            debug_sum_high_ms = 0.0;
-            debug_max_high_ms = 0.0;
-            debug_samples = 0;
-            debug_last_report_tp = now_tp;
-        }
-    }
 }
 
 

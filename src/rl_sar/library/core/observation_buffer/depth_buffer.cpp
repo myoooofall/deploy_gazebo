@@ -1,8 +1,24 @@
 #include "depth_buffer.hpp"
 #include <opencv2/highgui.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+#include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+
+static float Percentile(std::vector<float> values, double q)
+{
+    if (values.empty())
+    {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    if (q <= 0.0) q = 0.0;
+    if (q >= 1.0) q = 1.0;
+    const size_t k = static_cast<size_t>(q * static_cast<double>(values.size() - 1));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(k), values.end());
+    return values[k];
+}
 // DepthBuffer implementation
 DepthBuffer::DepthBuffer() {}
 
@@ -112,29 +128,54 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
         throw std::runtime_error(std::string("Depth decode failed: ") + e.what());
     }
 
-    // Invalid-depth handling for deployment debugging: invalid -> nearest range (0.1m)
+    // Invalid-depth handling: invalid -> far range (5.0m).
+    // This is safer for navigation than treating invalid as near obstacle.
     torch::Tensor valid_mask = torch::isfinite(depth_tensor) & (depth_tensor > 0.0);
-    depth_tensor = torch::where(valid_mask, depth_tensor, torch::full_like(depth_tensor, 0.1));
+    torch::Tensor invalid_mask = (~valid_mask).to(torch::kFloat32);
+    const float invalid_ratio_raw = invalid_mask.mean().item<float>();
+    depth_tensor = torch::where(valid_mask, depth_tensor, torch::full_like(depth_tensor, 5.0));
     
-    // First resize to intermediate size (60, 106): height=60, width=106
+    // First resize to intermediate size (60, 106): height=60, width=106.
+    // Use nearest for depth to avoid creating interpolated "fake" depths.
     depth_tensor = depth_tensor.unsqueeze(0).unsqueeze(0);  // Add batch and channel dims for interpolate
     depth_tensor = torch::nn::functional::interpolate(
         depth_tensor,
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{60, 106})
-            .mode(torch::kBilinear)
-            .align_corners(false)
+            .mode(torch::kNearest)
     ).squeeze(0).squeeze(0);  // Remove dims back to [60, 106]
+    torch::Tensor invalid_mask_resized = torch::nn::functional::interpolate(
+        invalid_mask.unsqueeze(0).unsqueeze(0),
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{60, 106})
+            .mode(torch::kNearest)
+    ).squeeze(0).squeeze(0);
     
     // Crop width: remove first 10 and last 10 columns [10:-10], keeping height unchanged
     // Result: [60, 86]
     depth_tensor = depth_tensor.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(10, -10)});  // [60, 86]
+    invalid_mask_resized = invalid_mask_resized.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(10, -10)});
     
     // // 打印裁剪后的范围
     // std::cout << "裁剪后的深度范围(米): [" << depth_tensor.min().item<float>() << ", " << depth_tensor.max().item<float>() << "]" << std::endl;
     
     // 将深度值裁剪到0.05-5.0米范围
     depth_tensor = torch::clamp(depth_tensor, 0.1, 5.0);
+    const float invalid_ratio_model_input = invalid_mask_resized.mean().item<float>();
+    const float far_ratio_model_input = (depth_tensor >= 4.9).to(torch::kFloat32).mean().item<float>();
+
+    torch::Tensor depth_for_stats = depth_tensor.contiguous();
+    const float *depth_ptr = depth_for_stats.data_ptr<float>();
+    const int64_t depth_numel = depth_for_stats.numel();
+    std::vector<float> depth_values;
+    depth_values.reserve(static_cast<size_t>(depth_numel));
+    for (int64_t i = 0; i < depth_numel; ++i)
+    {
+        depth_values.push_back(depth_ptr[i]);
+    }
+    const float p50_m = Percentile(depth_values, 0.50);
+    const float p90_m = Percentile(depth_values, 0.90);
+    const float p99_m = Percentile(depth_values, 0.99);
     
     // 发布用于可视化的深度图（在归一化之前保存原始值）
     if (processed_publisher) {
@@ -189,6 +230,55 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
                   << ", mean=" << model_depth_mean
                   << "]" << std::endl;
         depth_stats_logged_once = true;
+    }
+
+    static bool depth_health_inited = false;
+    static auto depth_health_last_tp = std::chrono::steady_clock::now();
+    static uint64_t depth_health_samples = 0;
+    static double depth_health_sum_invalid_raw = 0.0;
+    static double depth_health_sum_invalid_model = 0.0;
+    static double depth_health_sum_far_model = 0.0;
+    static double depth_health_max_raw = 0.0;
+    static double depth_health_last_p50 = 0.0;
+    static double depth_health_last_p90 = 0.0;
+    static double depth_health_last_p99 = 0.0;
+
+    if (!depth_health_inited)
+    {
+        depth_health_last_tp = std::chrono::steady_clock::now();
+        depth_health_inited = true;
+    }
+    depth_health_samples += 1;
+    depth_health_sum_invalid_raw += static_cast<double>(invalid_ratio_raw);
+    depth_health_sum_invalid_model += static_cast<double>(invalid_ratio_model_input);
+    depth_health_sum_far_model += static_cast<double>(far_ratio_model_input);
+    depth_health_max_raw = std::max(depth_health_max_raw, static_cast<double>(raw_depth_max_m));
+    depth_health_last_p50 = static_cast<double>(p50_m);
+    depth_health_last_p90 = static_cast<double>(p90_m);
+    depth_health_last_p99 = static_cast<double>(p99_m);
+
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now_tp - depth_health_last_tp).count() >= 1.0 && depth_health_samples > 0)
+    {
+        const double avg_invalid_raw = depth_health_sum_invalid_raw / static_cast<double>(depth_health_samples);
+        const double avg_invalid_model = depth_health_sum_invalid_model / static_cast<double>(depth_health_samples);
+        const double avg_far_model = depth_health_sum_far_model / static_cast<double>(depth_health_samples);
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(4)
+            << "[NAV][DEPTH][HEALTH] samples=" << depth_health_samples
+            << " invalid_raw=" << avg_invalid_raw
+            << " invalid_model=" << avg_invalid_model
+            << " far_model=" << avg_far_model
+            << " p50/p90/p99_m=[" << depth_health_last_p50 << "/" << depth_health_last_p90 << "/" << depth_health_last_p99 << "]"
+            << " raw_max_m=" << depth_health_max_raw;
+        std::cout << oss.str() << std::endl;
+
+        depth_health_samples = 0;
+        depth_health_sum_invalid_raw = 0.0;
+        depth_health_sum_invalid_model = 0.0;
+        depth_health_sum_far_model = 0.0;
+        depth_health_max_raw = 0.0;
+        depth_health_last_tp = now_tp;
     }
 
     return depth_tensor;  // Shape: [30, 43]

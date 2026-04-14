@@ -104,6 +104,11 @@ private:
     void RunHighLevel();
     bool InitHierarchicalNav();
     void UpdateHighFrequencyObs();
+    double GetNavEpisodeElapsedSec() const;
+    void ResetNavEpisodeClock();
+    void ResetNavModelStates();
+    void WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim);
+    void PrimeNavRuntimeOnce();
     void StartNavGoalInput();
     void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
     [[noreturn]] void DisableNavigationWithError(const std::string &stage, const std::string &detail);
@@ -130,6 +135,9 @@ private:
     int nav_obs_hist_len_ = 10;
     int nav_obs_io_hist_len_ = 10;
     int nav_highfreq_hist_len_ = 20;
+    int nav_obs_dim_ = 0;
+    int nav_obs_io_dim_ = 0;
+    int nav_hf_dim_ = 0;
     int nav_vision_channels_ = 1;      // expected channels for nav_vision_model input
     double nav_dt_ = 0.1;               // 10Hz
     double nav_episode_length_s_ = 30;  // default if not specified
@@ -162,12 +170,13 @@ private:
     torch::Tensor nav_high_command_;
 
     std::atomic<uint64_t> nav_active_goal_seq_{0};
-    // Time since current nav episode start for high-level policy (10Hz, advanced by nav_dt_).
+    std::atomic<int64_t> nav_episode_start_ns_{0};
+    // Cached elapsed time samples for debugging/inspection. Both are derived from the same episode clock.
     std::atomic<double> nav_time_io_{0.0};
-    // Time since current nav episode start for high-frequency buffer (advanced by params.dt).
     std::atomic<double> nav_time_io_hf_{0.0};
     std::atomic<double> nav_timer_left_{0.0};
     std::atomic<uint64_t> nav_hl_beat_seq_{0};
+    std::atomic<bool> nav_runtime_prime_done_{false};
 
     std::mutex nav_last_actions_mutex_;
     std::vector<float> nav_last_actions_;
