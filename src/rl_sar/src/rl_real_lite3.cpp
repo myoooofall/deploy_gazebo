@@ -186,7 +186,9 @@ RL_Real::RL_Real()
 #endif
 
     // read params from yaml
-    this->ang_vel_type = "ang_vel_world";
+    // Real robot IMU angular velocity is consumed as body-frame angular velocity
+    // by default (same convention as ROS2 sim path).
+    this->ang_vel_type = "ang_vel_body";
     this->robot_name = "lite3";
     this->ReadYamlBase(this->robot_name);
 
@@ -414,15 +416,16 @@ void RL_Real::GetState(RobotState<double> *state)
     state->imu.quaternion[2] = q[2]; // y
     state->imu.quaternion[3] = q[3]; // z
 
-    // Lite3 SDK angular velocity is in deg/s.
-    // By default we treat angular_velocity_{roll,pitch,yaw} as Euler angle rates
-    // and convert to body angular velocity [wx, wy, wz] for policy consistency.
+    // SDK attitude angles are in degrees; convert them to radians for trigonometry.
+    // On this deployment, SDK angular_velocity_{roll,pitch,yaw} is treated as rad/s.
+    // When nav_sdk_gyro_is_euler_rate_ is enabled, they are interpreted as ZYX Euler
+    // rates [roll_dot, pitch_dot, yaw_dot] and mapped to body gyro [wx, wy, wz].
     constexpr double kDeg2Rad = M_PI / 180.0;
     const double roll = static_cast<double>(this->robot_data_->imu.angle_roll) * kDeg2Rad;
     const double pitch = static_cast<double>(this->robot_data_->imu.angle_pitch) * kDeg2Rad;
-    const double roll_rate = static_cast<double>(this->robot_data_->imu.angular_velocity_roll) * kDeg2Rad;
-    const double pitch_rate = static_cast<double>(this->robot_data_->imu.angular_velocity_pitch) * kDeg2Rad;
-    const double yaw_rate = static_cast<double>(this->robot_data_->imu.angular_velocity_yaw) * kDeg2Rad;
+    const double roll_rate = static_cast<double>(this->robot_data_->imu.angular_velocity_roll);
+    const double pitch_rate = static_cast<double>(this->robot_data_->imu.angular_velocity_pitch);
+    const double yaw_rate = static_cast<double>(this->robot_data_->imu.angular_velocity_yaw);
 
     if (this->nav_sdk_gyro_is_euler_rate_)
     {
@@ -458,7 +461,7 @@ void RL_Real::GetState(RobotState<double> *state)
                 << " rpy_deg=[" << this->robot_data_->imu.angle_roll << ", "
                 << this->robot_data_->imu.angle_pitch << ", "
                 << this->robot_data_->imu.angle_yaw << "]"
-                << " raw_rpy_rate_deg_s=[" << this->robot_data_->imu.angular_velocity_roll << ", "
+                << " raw_rpy_rate_sdk=[" << this->robot_data_->imu.angular_velocity_roll << ", "
                 << this->robot_data_->imu.angular_velocity_pitch << ", "
                 << this->robot_data_->imu.angular_velocity_yaw << "]"
                 << " gyro_body_rad_s=[" << state->imu.gyroscope[0] << ", "
@@ -1463,10 +1466,7 @@ void RL_Real::PrimeNavRuntimeOnce()
 
         const auto begin_tp = std::chrono::steady_clock::now();
         const auto vision_begin_tp = std::chrono::steady_clock::now();
-        // Experiment mode: force vision input to all-zero tensor to isolate
-        // whether depth quality is the root cause of navigation instability.
-        torch::Tensor depth_for_model = torch::zeros_like(depth);
-        torch::Tensor vision_feat = this->nav_vision_model_.forward({depth_for_model}).toTensor();
+        torch::Tensor vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
         const double vision_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - vision_begin_tp).count();
 
@@ -1848,6 +1848,22 @@ bool RL_Real::InitHierarchicalNav()
     {
         this->nav_sdk_gyro_is_euler_rate_ = config["sdk_gyro_is_euler_rate"].as<bool>();
     }
+    if (config["ang_vel_type"])
+    {
+        const std::string configured_ang_vel_type = config["ang_vel_type"].as<std::string>();
+        if (configured_ang_vel_type == "ang_vel_body" || configured_ang_vel_type == "ang_vel_world")
+        {
+            this->ang_vel_type = configured_ang_vel_type;
+        }
+        else
+        {
+            std::cout << LOGGER::WARNING
+                      << "Invalid ang_vel_type='" << configured_ang_vel_type
+                      << "', fallback to '" << this->ang_vel_type
+                      << "'. Expected 'ang_vel_body' or 'ang_vel_world'."
+                      << std::endl;
+        }
+    }
     if (this->nav_vision_channels_ < 1)
     {
         this->nav_vision_channels_ = 1;
@@ -1878,6 +1894,7 @@ bool RL_Real::InitHierarchicalNav()
               << ", obs_log_interval_s=" << this->nav_obs_log_interval_s_
               << ", obs_log_dir=" << (this->nav_obs_log_dir_.empty() ? "(default)" : this->nav_obs_log_dir_)
               << ", sdk_gyro_is_euler_rate=" << (this->nav_sdk_gyro_is_euler_rate_ ? "true" : "false")
+              << ", low_level_ang_vel_type=" << this->ang_vel_type
               << std::endl;
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
@@ -2274,10 +2291,7 @@ void RL_Real::RunHighLevel()
             << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
         this->DisableNavigationWithError("vision_input", oss.str());
     }
-    // Experiment mode: force vision input to all-zero tensor to isolate
-    // whether depth quality is the root cause of navigation instability.
-    torch::Tensor depth_for_model = torch::zeros_like(depth);
-    vision_feat = this->nav_vision_model_.forward({depth_for_model}).toTensor();
+    vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
     const double vision_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - vision_begin_tp).count();
 
     torch::Tensor cmd;

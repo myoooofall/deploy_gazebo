@@ -30,6 +30,10 @@ lite3/navi:
   # Lite3 SDK reports angular_velocity_{roll,pitch,yaw}; interpret as Euler rates
   # and convert to body angular velocity before policy input.
   sdk_gyro_is_euler_rate: true
+  # Low-level RL "ang_vel" observation semantic:
+  # - ang_vel_body: directly use body-frame gyro
+  # - ang_vel_world: rotate by base quaternion inverse inside RL::ComputeObservation
+  ang_vel_type: "ang_vel_body"
   vision_channels: 8
   momentum_factor: 0.95
   num_observations: 45
