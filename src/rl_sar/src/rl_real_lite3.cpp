@@ -6,6 +6,7 @@
 #include "rl_real_lite3.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -249,13 +250,16 @@ RL_Real::RL_Real()
     this->sdk_imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
         "/imu/data", rclcpp::SystemDefaultsQoS());
 
-    std::cout << LOGGER::INFO
-              << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw (cache_latest) "
-              << "publish=/camera/depth/processed,/camera/depth/processed_norm (loop_vision@nav_dt)"
-              << std::endl;
-    std::cout << LOGGER::INFO
-              << "[SLAM][SDK2ROS] publish=/imu/data (sensor_msgs/Imu, source=lite3_sdk)"
-              << std::endl;
+    if (this->nav_console_info_enable_)
+    {
+        std::cout << LOGGER::INFO
+                  << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw (cache_latest) "
+                  << "publish=/camera/depth/processed,/camera/depth/processed_norm (loop_vision@nav_dt)"
+                  << '\n';
+        std::cout << LOGGER::INFO
+                  << "[SLAM][SDK2ROS] publish=/imu/data (sensor_msgs/Imu, source=lite3_sdk)"
+                  << '\n';
+    }
 
     this->odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
         "/Odometry", rclcpp::SystemDefaultsQoS(),
@@ -274,9 +278,12 @@ RL_Real::RL_Real()
     this->nav_cmd_applied_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3>(
         "/nav/cmd_applied", rclcpp::SystemDefaultsQoS());
 
-    std::cout << LOGGER::INFO
-              << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body,/nav/cmd_high,/nav/cmd_applied} (fallback: body-frame on same goal topics when /Odometry is absent)"
-              << std::endl;
+    if (this->nav_console_info_enable_)
+    {
+        std::cout << LOGGER::INFO
+                  << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body,/nav/cmd_high,/nav/cmd_applied} (fallback: body-frame on same goal topics when /Odometry is absent)"
+                  << '\n';
+    }
 #endif
 
     // init hierarchical nav policy (required)
@@ -447,7 +454,7 @@ void RL_Real::GetState(RobotState<double> *state)
         state->imu.gyroscope[2] = yaw_rate;
     }
 
-    if (this->nav_debug_enable_)
+    if (this->nav_console_info_enable_ && this->nav_debug_enable_)
     {
         static auto last_imu_debug_tp = std::chrono::steady_clock::time_point{};
         const auto now_tp = std::chrono::steady_clock::now();
@@ -467,7 +474,7 @@ void RL_Real::GetState(RobotState<double> *state)
                 << " gyro_body_rad_s=[" << state->imu.gyroscope[0] << ", "
                 << state->imu.gyroscope[1] << ", "
                 << state->imu.gyroscope[2] << "]";
-            std::cout << LOGGER::INFO << oss.str() << std::endl;
+            std::cout << LOGGER::INFO << oss.str() << '\n';
             last_imu_debug_tp = now_tp;
         }
     }
@@ -722,11 +729,11 @@ void RL_Real::RobotControl()
     {
         std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
         this->GetState(&this->robot_state);
-#if defined(USE_ROS2)
-        this->PublishSlamImuFromSdk(this->robot_state);
-#endif
-        this->UpdateHighFrequencyObs();
     }
+#if defined(USE_ROS2)
+    this->PublishSlamImuFromSdk(this->robot_state);
+#endif
+    this->UpdateHighFrequencyObs();
 
     // Command magnitude safety clamp for low-level policy inputs.
     // Applied after GetState so both keyboard and gamepad commands are constrained.
@@ -1010,10 +1017,13 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
     if (this->sdk_imu_pub_started_ == false)
     {
         this->sdk_imu_pub_started_ = true;
-        std::cout << LOGGER::INFO
-                  << "[SLAM][SDK2ROS] first /imu/data published from Lite3 SDK, stamp_ms="
-                  << imu_stamp_ms
-                  << std::endl;
+        if (this->nav_console_info_enable_)
+        {
+            std::cout << LOGGER::INFO
+                      << "[SLAM][SDK2ROS] first /imu/data published from Lite3 SDK, stamp_ms="
+                      << imu_stamp_ms
+                      << '\n';
+        }
     }
 }
 
@@ -1052,9 +1062,12 @@ void RL_Real::RunVision()
     const bool first_depth_frame = !g_depth_frame_received.exchange(true);
     if (first_depth_frame)
     {
-        std::cout << LOGGER::INFO
-                  << "[NAV][DEPTH] first processed depth frame ready from loop_vision (source=/camera/depth/image_rect_raw)"
-                  << std::endl;
+        if (this->nav_console_info_enable_)
+        {
+            std::cout << LOGGER::INFO
+                      << "[NAV][DEPTH] first processed depth frame ready from loop_vision (source=/camera/depth/image_rect_raw)"
+                      << '\n';
+        }
     }
 
     (void)proc_ms;
@@ -1397,10 +1410,13 @@ void RL_Real::WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim)
         (void)this->nav_high_model_.forward(inputs);
         const double warmup_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - warmup_begin_tp).count();
-        std::cout << LOGGER::INFO
-                  << "[NAV][INIT] warmup " << (i + 1) << "/" << warmup_iters
-                  << " took " << std::fixed << std::setprecision(2) << warmup_ms << " ms"
-                  << std::endl;
+        if (this->nav_console_info_enable_)
+        {
+            std::cout << LOGGER::INFO
+                      << "[NAV][INIT] warmup " << (i + 1) << "/" << warmup_iters
+                      << " took " << std::fixed << std::setprecision(2) << warmup_ms << " ms"
+                      << '\n';
+        }
     }
 
     this->ResetNavModelStates();
@@ -1486,7 +1502,10 @@ void RL_Real::PrimeNavRuntimeOnce()
             << "[NAV][INIT] runtime-prime done total_ms=" << total_ms
             << " vision_ms=" << vision_ms
             << " high_ms=" << high_ms;
-        std::cout << LOGGER::INFO << oss.str() << std::endl;
+        if (this->nav_console_info_enable_)
+        {
+            std::cout << LOGGER::INFO << oss.str() << '\n';
+        }
     }
     catch (const c10::Error &e)
     {
@@ -1583,11 +1602,14 @@ void RL_Real::StartNavObsLogIfNeeded(uint64_t goal_seq)
     this->nav_obs_log_last_time_io_ = -1.0;
     this->nav_obs_log_active_ = true;
 
-    std::cout << LOGGER::INFO
-              << "[NAV][OBSLOG] started goal_seq=" << goal_seq
-              << " path=" << this->nav_obs_log_path_
-              << " interval_s=" << this->nav_obs_log_interval_s_
-              << std::endl;
+    if (this->nav_console_info_enable_)
+    {
+        std::cout << LOGGER::INFO
+                  << "[NAV][OBSLOG] started goal_seq=" << goal_seq
+                  << " path=" << this->nav_obs_log_path_
+                  << " interval_s=" << this->nav_obs_log_interval_s_
+                  << '\n';
+    }
 }
 
 void RL_Real::StopNavObsLogIfNeeded()
@@ -1599,10 +1621,13 @@ void RL_Real::StopNavObsLogIfNeeded()
     }
     if (this->nav_obs_log_active_)
     {
-        std::cout << LOGGER::INFO
-                  << "[NAV][OBSLOG] stopped goal_seq=" << this->nav_obs_log_goal_seq_
-                  << " path=" << this->nav_obs_log_path_
-                  << std::endl;
+        if (this->nav_console_info_enable_)
+        {
+            std::cout << LOGGER::INFO
+                      << "[NAV][OBSLOG] stopped goal_seq=" << this->nav_obs_log_goal_seq_
+                      << " path=" << this->nav_obs_log_path_
+                      << '\n';
+        }
     }
     this->nav_obs_log_active_ = false;
     this->nav_obs_log_goal_seq_ = 0;
@@ -1822,6 +1847,22 @@ bool RL_Real::InitHierarchicalNav()
         const double interval_s = config["perf_log_interval_s"].as<double>();
         this->nav_perf_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
     }
+    if (config["console_info_enable"])
+    {
+        this->nav_console_info_enable_ = config["console_info_enable"].as<bool>();
+    }
+    if (config["loop_overrun_log_enable"])
+    {
+        this->nav_loop_overrun_log_enable_ = config["loop_overrun_log_enable"].as<bool>();
+    }
+    if (config["loop_lifecycle_log_enable"])
+    {
+        this->nav_loop_lifecycle_log_enable_ = config["loop_lifecycle_log_enable"].as<bool>();
+    }
+    if (config["depth_console_log_enable"])
+    {
+        this->nav_depth_console_log_enable_ = config["depth_console_log_enable"].as<bool>();
+    }
     if (config["debug_enable"])
     {
         this->nav_debug_enable_ = config["debug_enable"].as<bool>();
@@ -1869,33 +1910,44 @@ bool RL_Real::InitHierarchicalNav()
         this->nav_vision_channels_ = 1;
     }
 
+    LoopFunc::SetOverrunLogEnabled(this->nav_loop_overrun_log_enable_);
+    LoopFunc::SetLifecycleLogEnabled(this->nav_loop_lifecycle_log_enable_);
+    DepthBuffer::SetConsoleLogEnabled(this->nav_depth_console_log_enable_);
+
     // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
-    std::cout << LOGGER::INFO
-              << "Nav vision_channels=" << this->nav_vision_channels_
-              << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
-              << ", cmd_clip=["
-              << this->nav_command_clip_x_ << ", "
-              << this->nav_command_clip_y_ << ", "
-              << this->nav_command_clip_yaw_ << "]"
-              << ", cmd_filter_alpha=" << this->nav_high_command_filter_alpha_
-              << ", cmd_step_limits=["
-              << this->nav_high_command_max_step_x_ << ", "
-              << this->nav_high_command_max_step_y_ << ", "
-              << this->nav_high_command_max_step_yaw_ << "]"
-              << ", goal_stop_radius=" << this->nav_goal_stop_radius_
-              << ", depth_target_hz=" << ((this->nav_dt_ > 0.0) ? (1.0 / this->nav_dt_) : 10.0)
-              << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
-              << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
-              << ", perf_log_interval_s=" << this->nav_perf_log_interval_s_
-              << ", debug_enable=" << (this->nav_debug_enable_ ? "true" : "false")
-              << ", debug_log_interval_s=" << this->nav_debug_log_interval_s_
-              << ", obs_log_enable=" << (this->nav_obs_log_enable_ ? "true" : "false")
-              << ", obs_log_interval_s=" << this->nav_obs_log_interval_s_
-              << ", obs_log_dir=" << (this->nav_obs_log_dir_.empty() ? "(default)" : this->nav_obs_log_dir_)
-              << ", sdk_gyro_is_euler_rate=" << (this->nav_sdk_gyro_is_euler_rate_ ? "true" : "false")
-              << ", low_level_ang_vel_type=" << this->ang_vel_type
-              << std::endl;
+    if (this->nav_console_info_enable_)
+    {
+        std::cout << LOGGER::INFO
+                  << "Nav vision_channels=" << this->nav_vision_channels_
+                  << ", depth_history_steps=" << (this->nav_vision_channels_ + 1)
+                  << ", cmd_clip=["
+                  << this->nav_command_clip_x_ << ", "
+                  << this->nav_command_clip_y_ << ", "
+                  << this->nav_command_clip_yaw_ << "]"
+                  << ", cmd_filter_alpha=" << this->nav_high_command_filter_alpha_
+                  << ", cmd_step_limits=["
+                  << this->nav_high_command_max_step_x_ << ", "
+                  << this->nav_high_command_max_step_y_ << ", "
+                  << this->nav_high_command_max_step_yaw_ << "]"
+                  << ", goal_stop_radius=" << this->nav_goal_stop_radius_
+                  << ", depth_target_hz=" << ((this->nav_dt_ > 0.0) ? (1.0 / this->nav_dt_) : 10.0)
+                  << ", watchdog_timeout_ms=" << this->nav_watchdog_timeout_ms_
+                  << ", perf_log_enable=" << (this->nav_perf_log_enable_ ? "true" : "false")
+                  << ", perf_log_interval_s=" << this->nav_perf_log_interval_s_
+                  << ", console_info_enable=" << (this->nav_console_info_enable_ ? "true" : "false")
+                  << ", loop_overrun_log_enable=" << (this->nav_loop_overrun_log_enable_ ? "true" : "false")
+                  << ", loop_lifecycle_log_enable=" << (this->nav_loop_lifecycle_log_enable_ ? "true" : "false")
+                  << ", depth_console_log_enable=" << (this->nav_depth_console_log_enable_ ? "true" : "false")
+                  << ", debug_enable=" << (this->nav_debug_enable_ ? "true" : "false")
+                  << ", debug_log_interval_s=" << this->nav_debug_log_interval_s_
+                  << ", obs_log_enable=" << (this->nav_obs_log_enable_ ? "true" : "false")
+                  << ", obs_log_interval_s=" << this->nav_obs_log_interval_s_
+                  << ", obs_log_dir=" << (this->nav_obs_log_dir_.empty() ? "(default)" : this->nav_obs_log_dir_)
+                  << ", sdk_gyro_is_euler_rate=" << (this->nav_sdk_gyro_is_euler_rate_ ? "true" : "false")
+                  << ", low_level_ang_vel_type=" << this->ang_vel_type
+                  << '\n';
+    }
 
     this->nav_timer_left_.store(this->nav_episode_length_s_);
     this->nav_episode_start_ns_.store(0, std::memory_order_relaxed);
@@ -2001,6 +2053,10 @@ void RL_Real::RunHighLevel()
     }
     static auto last_gate_log_tp = std::chrono::steady_clock::time_point{};
     const auto maybe_log_gate = [this](const char *reason, uint64_t goal_seq_now) {
+        if (!this->nav_console_info_enable_)
+        {
+            return;
+        }
         const auto now_tp = std::chrono::steady_clock::now();
         if (last_gate_log_tp.time_since_epoch().count() != 0 &&
             std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_gate_log_tp).count() < 1)
@@ -2011,7 +2067,7 @@ void RL_Real::RunHighLevel()
                   << "[NAV][GATE] mode=ON blocked_by=" << reason
                   << " rl_init_done=" << (this->rl_init_done ? 1 : 0)
                   << " goal_seq=" << goal_seq_now
-                  << std::endl;
+                  << '\n';
         last_gate_log_tp = now_tp;
     };
     const auto clear_nav_cmd = [this]() {
@@ -2069,28 +2125,50 @@ void RL_Real::RunHighLevel()
     torch::Tensor timer_tensor = torch::tensor({{static_cast<float>(timer_norm)}});
 
     const int dof = this->params.num_of_dofs;
-    torch::Tensor base_ang_vel, projected_gravity, dof_pos_raw, dof_pos_term, dof_vel_raw, dof_vel_term;
+    std::array<float, 4> imu_quat_snapshot{1.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 3> imu_gyro_snapshot{0.0f, 0.0f, 0.0f};
+    std::array<float, 32> dof_pos_snapshot{};
+    std::array<float, 32> dof_vel_snapshot{};
     {
         std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
-        torch::Tensor base_quat = torch::tensor({{
-            static_cast<float>(this->robot_state.imu.quaternion[0]),
-            static_cast<float>(this->robot_state.imu.quaternion[1]),
-            static_cast<float>(this->robot_state.imu.quaternion[2]),
-            static_cast<float>(this->robot_state.imu.quaternion[3]),
-        }});
-        torch::Tensor gravity_vec = torch::tensor({{0.0f, 0.0f, -1.0f}});
-        projected_gravity = this->QuatRotateInverse(base_quat, gravity_vec);
-        base_ang_vel = torch::tensor({{
-            static_cast<float>(this->robot_state.imu.gyroscope[0]),
-            static_cast<float>(this->robot_state.imu.gyroscope[1]),
-            static_cast<float>(this->robot_state.imu.gyroscope[2]),
-        }}) * static_cast<float>(this->params.ang_vel_scale);
-
-        dof_pos_raw = torch::tensor(this->robot_state.motor_state.q).narrow(0, 0, dof).unsqueeze(0).to(torch::kFloat32);
-        dof_vel_raw = torch::tensor(this->robot_state.motor_state.dq).narrow(0, 0, dof).unsqueeze(0).to(torch::kFloat32);
-        dof_pos_term = (dof_pos_raw - this->params.default_dof_pos) * static_cast<float>(this->params.dof_pos_scale);
-        dof_vel_term = dof_vel_raw * static_cast<float>(this->params.dof_vel_scale);
+        for (int i = 0; i < 4; ++i)
+        {
+            imu_quat_snapshot[i] = static_cast<float>(this->robot_state.imu.quaternion[i]);
+        }
+        for (int i = 0; i < 3; ++i)
+        {
+            imu_gyro_snapshot[i] = static_cast<float>(this->robot_state.imu.gyroscope[i]);
+        }
+        const int dof_copy = std::min(dof, 32);
+        for (int i = 0; i < dof_copy; ++i)
+        {
+            dof_pos_snapshot[i] = static_cast<float>(this->robot_state.motor_state.q[i]);
+            dof_vel_snapshot[i] = static_cast<float>(this->robot_state.motor_state.dq[i]);
+        }
     }
+    torch::Tensor base_quat = torch::tensor({{
+        imu_quat_snapshot[0],
+        imu_quat_snapshot[1],
+        imu_quat_snapshot[2],
+        imu_quat_snapshot[3],
+    }});
+    torch::Tensor gravity_vec = torch::tensor({{0.0f, 0.0f, -1.0f}});
+    torch::Tensor projected_gravity = this->QuatRotateInverse(base_quat, gravity_vec);
+    torch::Tensor base_ang_vel = torch::tensor({{
+        imu_gyro_snapshot[0],
+        imu_gyro_snapshot[1],
+        imu_gyro_snapshot[2],
+    }}) * static_cast<float>(this->params.ang_vel_scale);
+    torch::Tensor dof_pos_raw = torch::from_blob(
+        dof_pos_snapshot.data(),
+        {1, dof},
+        torch::TensorOptions().dtype(torch::kFloat32)).clone();
+    torch::Tensor dof_vel_raw = torch::from_blob(
+        dof_vel_snapshot.data(),
+        {1, dof},
+        torch::TensorOptions().dtype(torch::kFloat32)).clone();
+    torch::Tensor dof_pos_term = (dof_pos_raw - this->params.default_dof_pos) * static_cast<float>(this->params.dof_pos_scale);
+    torch::Tensor dof_vel_term = dof_vel_raw * static_cast<float>(this->params.dof_vel_scale);
 
     torch::Tensor actions = torch::zeros({1, dof}, torch::dtype(torch::kFloat32));
     {
@@ -2110,7 +2188,7 @@ void RL_Real::RunHighLevel()
     }
     torch::Tensor prev_high_command_scaled =
         prev_high_command * this->params.commands_scale.to(torch::kFloat32);
-    if (this->nav_debug_enable_)
+    if (this->nav_console_info_enable_ && this->nav_debug_enable_)
     {
         static auto last_obs_debug_tp = std::chrono::steady_clock::time_point{};
         const auto now_tp = std::chrono::steady_clock::now();
@@ -2121,9 +2199,9 @@ void RL_Real::RunHighLevel()
             oss << std::fixed << std::setprecision(4)
                 << "[NAV][CHK][OBS]"
                 << " ang_vel_raw_rad_s=["
-                << this->robot_state.imu.gyroscope[0] << ", "
-                << this->robot_state.imu.gyroscope[1] << ", "
-                << this->robot_state.imu.gyroscope[2] << "]"
+                << imu_gyro_snapshot[0] << ", "
+                << imu_gyro_snapshot[1] << ", "
+                << imu_gyro_snapshot[2] << "]"
                 << " ang_vel_scaled=["
                 << base_ang_vel[0][0].item<double>() << ", "
                 << base_ang_vel[0][1].item<double>() << ", "
@@ -2132,7 +2210,7 @@ void RL_Real::RunHighLevel()
                 << projected_gravity[0][0].item<double>() << ", "
                 << projected_gravity[0][1].item<double>() << ", "
                 << projected_gravity[0][2].item<double>() << "]";
-            std::cout << LOGGER::INFO << oss.str() << std::endl;
+            std::cout << LOGGER::INFO << oss.str() << '\n';
             last_obs_debug_tp = now_tp;
         }
     }
@@ -2189,11 +2267,11 @@ void RL_Real::RunHighLevel()
         this->nav_obs_io_hist_buf_.insert(obs_io_frame);
     }
 
-    // Align HF timeline with current nav tick: append one fresh HF sample
-    // right before reading hf_hist in loop_nav.
+    // Align HF timeline with current nav tick using the current loop_nav snapshot.
+    // This avoids reacquiring nav_state_mutex_ and re-reading shared state.
     {
-        std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
-        this->UpdateHighFrequencyObs();
+        std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
+        this->nav_highfreq_buf_.insert(obs_io_frame_hf);
     }
 
     std::vector<int> obs_ids_10;
@@ -2221,7 +2299,7 @@ void RL_Real::RunHighLevel()
         timeio_check_goal_seq = goal_seq;
         timeio_check_count = 0;
     }
-    if (timeio_check_count < 3)
+    if (this->nav_console_info_enable_ && this->nav_debug_enable_ && timeio_check_count < 3)
     {
         timeio_check_count++;
         const double time_io_hf_now = this->nav_time_io_hf_.load();
@@ -2257,7 +2335,7 @@ void RL_Real::RunHighLevel()
             << " hf_hist_latest_time=" << hf_hist_latest_time
             << " hf_minus_lf_now=" << (time_io_hf_now - time_io)
             << " hf_hist_latest_minus_lf=" << (hf_hist_latest_time - time_io);
-        std::cout << LOGGER::INFO << oss.str() << std::endl;
+        std::cout << LOGGER::INFO << oss.str() << '\n';
     }
 
     torch::Tensor vision_feat;
@@ -2358,7 +2436,7 @@ void RL_Real::RunHighLevel()
                 << "[NAV][PERF] samples=" << perf_samples
                 << " vision_ms(avg/max)=[" << avg_vision_ms << "/" << perf_max_vision_ms << "]"
                 << " high_ms(avg/max)=[" << avg_high_ms << "/" << perf_max_high_ms << "]";
-            std::cout << LOGGER::INFO << oss.str() << std::endl;
+            std::cout << LOGGER::INFO << oss.str() << '\n';
 
             perf_sum_vision_ms = 0.0;
             perf_sum_high_ms = 0.0;
@@ -2416,7 +2494,7 @@ void RL_Real::RunHighLevel()
     const auto now_tp = std::chrono::steady_clock::now();
     const bool due_log = (last_nav_run_log_tp.time_since_epoch().count() == 0) ||
                          (std::chrono::duration_cast<std::chrono::seconds>(now_tp - last_nav_run_log_tp).count() >= 1);
-    if (new_goal || due_log)
+    if (this->nav_console_info_enable_ && (new_goal || due_log))
     {
         double pred_x = std::numeric_limits<double>::quiet_NaN();
         double pred_y = std::numeric_limits<double>::quiet_NaN();
@@ -2451,7 +2529,7 @@ void RL_Real::RunHighLevel()
             << " cmd:[" << cmd[0][0].item<double>() << ", "
             << cmd[0][1].item<double>() << ", "
             << cmd[0][2].item<double>() << "]";
-        std::cout << LOGGER::INFO << oss.str() << std::endl;
+        std::cout << LOGGER::INFO << oss.str() << '\n';
         last_nav_run_log_tp = now_tp;
     }
 
@@ -2486,11 +2564,14 @@ void RL_Real::RunHighLevel()
             this->control.yaw = 0.0;
             clear_nav_cmd();
             this->StopNavObsLogIfNeeded();
-            std::cout << LOGGER::INFO
-                      << "[NAV][STOP] Navigation mode: OFF (goal reached, pred_radius="
-                      << goal_pred_radius << " <= " << this->nav_goal_stop_radius_
-                      << ")"
-                      << std::endl;
+            if (this->nav_console_info_enable_)
+            {
+                std::cout << LOGGER::INFO
+                          << "[NAV][STOP] Navigation mode: OFF (goal reached, pred_radius="
+                          << goal_pred_radius << " <= " << this->nav_goal_stop_radius_
+                          << ")"
+                          << '\n';
+            }
             return;
         }
     }

@@ -10,6 +10,9 @@
 class DepthBuffer
 {
 public:
+    static void SetConsoleLogEnabled(bool enabled);
+    static bool IsConsoleLogEnabled();
+
     DepthBuffer(int num_envs, int height, int width, int include_history_steps);
     DepthBuffer();
 

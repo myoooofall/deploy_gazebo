@@ -22,13 +22,26 @@
 class LoopFunc
 {
 public:
+    static void SetLifecycleLogEnabled(bool enabled)
+    {
+        lifecycleLogEnabled().store(enabled, std::memory_order_relaxed);
+    }
+
+    static void SetOverrunLogEnabled(bool enabled)
+    {
+        overrunLogEnabled().store(enabled, std::memory_order_relaxed);
+    }
+
     LoopFunc(const std::string &name, double period, std::function<void()> func, int bindCPU = -1)
         : _name(name), _period(period), _func(func), _bindCPU(bindCPU), _running(false) {}
 
     void start()
     {
         _running = true;
-        log("[Loop Start] named: " + _name + ", period: " + formatPeriod() + "(ms)" + (_bindCPU != -1 ? ", run at cpu: " + std::to_string(_bindCPU) : ", cpu unspecified"));
+        if (lifecycleLogEnabled().load(std::memory_order_relaxed))
+        {
+            log("[Loop Start] named: " + _name + ", period: " + formatPeriod() + "(ms)" + (_bindCPU != -1 ? ", run at cpu: " + std::to_string(_bindCPU) : ", cpu unspecified"));
+        }
         if (_bindCPU != -1)
         {
             _thread = std::thread(&LoopFunc::loop, this);
@@ -51,7 +64,10 @@ public:
         {
             _thread.join();
         }
-        log("[Loop End] named: " + _name);
+        if (lifecycleLogEnabled().load(std::memory_order_relaxed))
+        {
+            log("[Loop End] named: " + _name);
+        }
     }
 
 private:
@@ -118,7 +134,7 @@ private:
 
             if (end - windowStart >= statWindow)
             {
-                if (windowOverruns > 0)
+                if (windowOverruns > 0 && overrunLogEnabled().load(std::memory_order_relaxed))
                 {
                     const double overrunRate = 100.0 * static_cast<double>(windowOverruns) / static_cast<double>(windowCycles);
                     std::ostringstream oss;
@@ -155,7 +171,19 @@ private:
     {
         static std::mutex logMutex;
         std::lock_guard<std::mutex> lock(logMutex);
-        std::cout << message << std::endl;
+        std::cout << message << '\n';
+    }
+
+    static std::atomic<bool> &lifecycleLogEnabled()
+    {
+        static std::atomic<bool> enabled{true};
+        return enabled;
+    }
+
+    static std::atomic<bool> &overrunLogEnabled()
+    {
+        static std::atomic<bool> enabled{true};
+        return enabled;
     }
 
     void setThreadAffinity(std::thread::native_handle_type threadHandle, int cpuId)

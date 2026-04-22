@@ -18,9 +18,15 @@ lite3/navi:
   clip_commands_vy: 0.5
   clip_commands_w: 1.0
   watchdog_timeout_ms: 3000
+  # Runtime console log policy (to reduce scheduling jitter on NX):
+  # keep only [NAV][PERF] periodic summary by default.
+  console_info_enable: false
+  loop_overrun_log_enable: false
+  loop_lifecycle_log_enable: false
+  depth_console_log_enable: false
   perf_log_enable: true
   perf_log_interval_s: 1.0
-  debug_enable: True
+  debug_enable: false
   debug_log_interval_s: 1.0
   # Structured semantic observation logger (CSV): enabled during navigation.
   # Default path is <rl_sar>/logs/nav_obs when obs_log_dir is empty.

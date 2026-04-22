@@ -174,6 +174,11 @@ private:
     int nav_watchdog_timeout_ms_ = 1200; // stale high-level heartbeat timeout
     bool nav_perf_log_enable_ = false;   // 1Hz-ish high-level perf stats
     double nav_perf_log_interval_s_ = 1.0;
+    // Console log policy: keep runtime stdout minimal to reduce jitter.
+    bool nav_console_info_enable_ = false;
+    bool nav_loop_overrun_log_enable_ = false;
+    bool nav_loop_lifecycle_log_enable_ = false;
+    bool nav_depth_console_log_enable_ = false;
     bool nav_debug_enable_ = false;      // extra debug timing logs
     double nav_debug_log_interval_s_ = 1.0;
     bool nav_obs_log_enable_ = false;    // structured semantic-observation csv logger (for sim-vs-real comparison)

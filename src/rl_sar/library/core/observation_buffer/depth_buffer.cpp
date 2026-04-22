@@ -2,10 +2,23 @@
 #include <opencv2/highgui.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+
+static std::atomic<bool> g_depth_console_log_enabled{true};
+
+void DepthBuffer::SetConsoleLogEnabled(bool enabled)
+{
+    g_depth_console_log_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool DepthBuffer::IsConsoleLogEnabled()
+{
+    return g_depth_console_log_enabled.load(std::memory_order_relaxed);
+}
 
 static float Percentile(std::vector<float> values, double q)
 {
@@ -218,67 +231,73 @@ torch::Tensor DepthBuffer::process_depth_image(const sensor_msgs::msg::Image::Sh
     const float model_depth_min = depth_tensor.min().item<float>();
     const float model_depth_max = depth_tensor.max().item<float>();
     const float model_depth_mean = depth_tensor.mean().item<float>();
-    static bool depth_stats_logged_once = false;
-    if (!depth_stats_logged_once)
+    if (DepthBuffer::IsConsoleLogEnabled())
     {
-        std::cout << std::fixed << std::setprecision(4)
-                  << "[NAV][DEPTH] raw_m[min=" << raw_depth_min_m
-                  << ", max=" << raw_depth_max_m
-                  << ", mean=" << raw_depth_mean_m
-                  << "] model[min=" << model_depth_min
-                  << ", max=" << model_depth_max
-                  << ", mean=" << model_depth_mean
-                  << "]" << std::endl;
-        depth_stats_logged_once = true;
+        static bool depth_stats_logged_once = false;
+        if (!depth_stats_logged_once)
+        {
+            std::cout << std::fixed << std::setprecision(4)
+                      << "[NAV][DEPTH] raw_m[min=" << raw_depth_min_m
+                      << ", max=" << raw_depth_max_m
+                      << ", mean=" << raw_depth_mean_m
+                      << "] model[min=" << model_depth_min
+                      << ", max=" << model_depth_max
+                      << ", mean=" << model_depth_mean
+                      << "]\n";
+            depth_stats_logged_once = true;
+        }
     }
 
-    static bool depth_health_inited = false;
-    static auto depth_health_last_tp = std::chrono::steady_clock::now();
-    static uint64_t depth_health_samples = 0;
-    static double depth_health_sum_invalid_raw = 0.0;
-    static double depth_health_sum_invalid_model = 0.0;
-    static double depth_health_sum_far_model = 0.0;
-    static double depth_health_max_raw = 0.0;
-    static double depth_health_last_p50 = 0.0;
-    static double depth_health_last_p90 = 0.0;
-    static double depth_health_last_p99 = 0.0;
-
-    if (!depth_health_inited)
+    if (DepthBuffer::IsConsoleLogEnabled())
     {
-        depth_health_last_tp = std::chrono::steady_clock::now();
-        depth_health_inited = true;
-    }
-    depth_health_samples += 1;
-    depth_health_sum_invalid_raw += static_cast<double>(invalid_ratio_raw);
-    depth_health_sum_invalid_model += static_cast<double>(invalid_ratio_model_input);
-    depth_health_sum_far_model += static_cast<double>(far_ratio_model_input);
-    depth_health_max_raw = std::max(depth_health_max_raw, static_cast<double>(raw_depth_max_m));
-    depth_health_last_p50 = static_cast<double>(p50_m);
-    depth_health_last_p90 = static_cast<double>(p90_m);
-    depth_health_last_p99 = static_cast<double>(p99_m);
+        static bool depth_health_inited = false;
+        static auto depth_health_last_tp = std::chrono::steady_clock::now();
+        static uint64_t depth_health_samples = 0;
+        static double depth_health_sum_invalid_raw = 0.0;
+        static double depth_health_sum_invalid_model = 0.0;
+        static double depth_health_sum_far_model = 0.0;
+        static double depth_health_max_raw = 0.0;
+        static double depth_health_last_p50 = 0.0;
+        static double depth_health_last_p90 = 0.0;
+        static double depth_health_last_p99 = 0.0;
 
-    const auto now_tp = std::chrono::steady_clock::now();
-    if (std::chrono::duration<double>(now_tp - depth_health_last_tp).count() >= 1.0 && depth_health_samples > 0)
-    {
-        const double avg_invalid_raw = depth_health_sum_invalid_raw / static_cast<double>(depth_health_samples);
-        const double avg_invalid_model = depth_health_sum_invalid_model / static_cast<double>(depth_health_samples);
-        const double avg_far_model = depth_health_sum_far_model / static_cast<double>(depth_health_samples);
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(4)
-            << "[NAV][DEPTH][HEALTH] samples=" << depth_health_samples
-            << " invalid_raw=" << avg_invalid_raw
-            << " invalid_model=" << avg_invalid_model
-            << " far_model=" << avg_far_model
-            << " p50/p90/p99_m=[" << depth_health_last_p50 << "/" << depth_health_last_p90 << "/" << depth_health_last_p99 << "]"
-            << " raw_max_m=" << depth_health_max_raw;
-        std::cout << oss.str() << std::endl;
+        if (!depth_health_inited)
+        {
+            depth_health_last_tp = std::chrono::steady_clock::now();
+            depth_health_inited = true;
+        }
+        depth_health_samples += 1;
+        depth_health_sum_invalid_raw += static_cast<double>(invalid_ratio_raw);
+        depth_health_sum_invalid_model += static_cast<double>(invalid_ratio_model_input);
+        depth_health_sum_far_model += static_cast<double>(far_ratio_model_input);
+        depth_health_max_raw = std::max(depth_health_max_raw, static_cast<double>(raw_depth_max_m));
+        depth_health_last_p50 = static_cast<double>(p50_m);
+        depth_health_last_p90 = static_cast<double>(p90_m);
+        depth_health_last_p99 = static_cast<double>(p99_m);
 
-        depth_health_samples = 0;
-        depth_health_sum_invalid_raw = 0.0;
-        depth_health_sum_invalid_model = 0.0;
-        depth_health_sum_far_model = 0.0;
-        depth_health_max_raw = 0.0;
-        depth_health_last_tp = now_tp;
+        const auto now_tp = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now_tp - depth_health_last_tp).count() >= 1.0 && depth_health_samples > 0)
+        {
+            const double avg_invalid_raw = depth_health_sum_invalid_raw / static_cast<double>(depth_health_samples);
+            const double avg_invalid_model = depth_health_sum_invalid_model / static_cast<double>(depth_health_samples);
+            const double avg_far_model = depth_health_sum_far_model / static_cast<double>(depth_health_samples);
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(4)
+                << "[NAV][DEPTH][HEALTH] samples=" << depth_health_samples
+                << " invalid_raw=" << avg_invalid_raw
+                << " invalid_model=" << avg_invalid_model
+                << " far_model=" << avg_far_model
+                << " p50/p90/p99_m=[" << depth_health_last_p50 << "/" << depth_health_last_p90 << "/" << depth_health_last_p99 << "]"
+                << " raw_max_m=" << depth_health_max_raw;
+            std::cout << oss.str() << '\n';
+
+            depth_health_samples = 0;
+            depth_health_sum_invalid_raw = 0.0;
+            depth_health_sum_invalid_model = 0.0;
+            depth_health_sum_far_model = 0.0;
+            depth_health_max_raw = 0.0;
+            depth_health_last_tp = now_tp;
+        }
     }
 
     return depth_tensor;  // Shape: [30, 43]
