@@ -146,6 +146,7 @@ private:
     // buffers and models (guarded as needed)
     torch::jit::script::Module nav_high_model_;
     torch::jit::script::Module nav_vision_model_;
+    torch::Device nav_infer_device_ = torch::Device(torch::kCPU);
     std::string nav_config_path_;
     std::string nav_high_model_path_;
     std::string nav_vision_model_path_;

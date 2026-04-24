@@ -38,6 +38,15 @@ static void ConfigureTorchJitForRealtime()
     });
 }
 
+static void ConfigureTorchThreadingForRealtime()
+{
+    // Keep CPU headroom for control/ROS threads on NX while nav models run on GPU.
+    constexpr int kTorchIntraOpThreads = 2;
+    constexpr int kTorchInterOpThreads = 1;
+    torch::set_num_threads(kTorchIntraOpThreads);
+    torch::set_num_interop_threads(kTorchInterOpThreads);
+}
+
 static double WrapToPi(double a)
 {
     while (a > M_PI) a -= 2.0 * M_PI;
@@ -209,8 +218,23 @@ RL_Real::RL_Real()
 
     // init torch
     torch::autograd::GradMode::set_enabled(false);
-    torch::set_num_threads(4);
+    ConfigureTorchThreadingForRealtime();
     ConfigureTorchJitForRealtime();
+    // Prefer GPU inference for navigation models; fallback to CPU if CUDA is unavailable.
+    this->nav_infer_device_ = torch::Device(torch::kCPU);
+    try
+    {
+        (void)torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        this->nav_infer_device_ = torch::Device(torch::kCUDA, 0);
+    }
+    catch (const c10::Error &)
+    {
+        this->nav_infer_device_ = torch::Device(torch::kCPU);
+    }
+    std::cout << LOGGER::INFO
+              << "Navigation inference target device: "
+              << this->nav_infer_device_.str()
+              << std::endl;
 
 
     // Network init
@@ -1395,7 +1419,7 @@ void RL_Real::ResetNavModelStates()
 void RL_Real::WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim)
 {
     torch::NoGradGuard no_grad;
-    const auto opts = torch::TensorOptions().dtype(torch::kFloat32);
+    const auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(this->nav_infer_device_);
     torch::Tensor vision_input = torch::zeros({1, this->nav_vision_channels_, 30, 43}, opts);
     torch::Tensor obs_frame = torch::zeros({1, obs_dim}, opts);
     torch::Tensor obs_io_hist = torch::zeros({1, obs_io_dim * this->nav_obs_io_hist_len_}, opts);
@@ -1475,14 +1499,19 @@ void RL_Real::PrimeNavRuntimeOnce()
     {
         torch::NoGradGuard no_grad;
         torch::InferenceMode infer_mode;
-        const auto opts = torch::TensorOptions().dtype(torch::kFloat32);
+        const auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(this->nav_infer_device_);
         const torch::Tensor obs_frame = torch::zeros({1, this->nav_obs_dim_}, opts);
         const torch::Tensor obs_io_hist = torch::zeros({1, this->nav_obs_io_dim_ * this->nav_obs_io_hist_len_}, opts);
         const torch::Tensor hf_hist = torch::zeros({1, this->nav_hf_dim_ * this->nav_highfreq_hist_len_}, opts);
+        torch::Tensor depth_model = depth;
+        if (depth_model.device() != this->nav_infer_device_)
+        {
+            depth_model = depth_model.to(this->nav_infer_device_);
+        }
 
         const auto begin_tp = std::chrono::steady_clock::now();
         const auto vision_begin_tp = std::chrono::steady_clock::now();
-        torch::Tensor vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+        torch::Tensor vision_feat = this->nav_vision_model_.forward({depth_model}).toTensor();
         const double vision_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - vision_begin_tp).count();
 
@@ -1945,6 +1974,7 @@ bool RL_Real::InitHierarchicalNav()
                   << ", obs_log_interval_s=" << this->nav_obs_log_interval_s_
                   << ", obs_log_dir=" << (this->nav_obs_log_dir_.empty() ? "(default)" : this->nav_obs_log_dir_)
                   << ", sdk_gyro_is_euler_rate=" << (this->nav_sdk_gyro_is_euler_rate_ ? "true" : "false")
+                  << ", nav_infer_device=" << this->nav_infer_device_.str()
                   << ", low_level_ang_vel_type=" << this->ang_vel_type
                   << '\n';
     }
@@ -1959,8 +1989,28 @@ bool RL_Real::InitHierarchicalNav()
 
     this->nav_high_model_ = torch::jit::load(this->nav_high_model_path_);
     this->nav_vision_model_ = torch::jit::load(this->nav_vision_model_path_);
-    this->nav_high_model_.eval();
-    this->nav_vision_model_.eval();
+    try
+    {
+        this->nav_high_model_.to(this->nav_infer_device_);
+        this->nav_vision_model_.to(this->nav_infer_device_);
+        this->nav_high_model_.eval();
+        this->nav_vision_model_.eval();
+    }
+    catch (const c10::Error &e)
+    {
+        std::cout << LOGGER::WARNING
+                  << "Failed to move nav models to target device (" << this->nav_infer_device_.str()
+                  << "), fallback to CPU. reason: " << e.what()
+                  << std::endl;
+        this->nav_infer_device_ = torch::Device(torch::kCPU);
+        this->nav_high_model_.to(this->nav_infer_device_);
+        this->nav_vision_model_.to(this->nav_infer_device_);
+        this->nav_high_model_.eval();
+        this->nav_vision_model_.eval();
+    }
+    std::cout << LOGGER::INFO
+              << "Navigation inference device: " << this->nav_infer_device_.str()
+              << std::endl;
 
     // training-aligned dims (go2)
     const int dof = this->params.num_of_dofs; // 12
@@ -2369,13 +2419,27 @@ void RL_Real::RunHighLevel()
             << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
         this->DisableNavigationWithError("vision_input", oss.str());
     }
-    vision_feat = this->nav_vision_model_.forward({depth}).toTensor();
+    torch::Tensor depth_model = depth;
+    if (depth_model.device() != this->nav_infer_device_)
+    {
+        depth_model = depth_model.to(this->nav_infer_device_);
+    }
+    torch::Tensor obs_frame_model = obs_frame;
+    torch::Tensor obs_io_hist_model = obs_io_hist;
+    torch::Tensor hf_hist_model = hf_hist;
+    if (obs_frame_model.device() != this->nav_infer_device_)
+    {
+        obs_frame_model = obs_frame_model.to(this->nav_infer_device_);
+        obs_io_hist_model = obs_io_hist_model.to(this->nav_infer_device_);
+        hf_hist_model = hf_hist_model.to(this->nav_infer_device_);
+    }
+    vision_feat = this->nav_vision_model_.forward({depth_model}).toTensor();
     const double vision_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - vision_begin_tp).count();
 
     torch::Tensor cmd;
     torch::Tensor pred_target_body;
     const auto high_begin_tp = SteadyClock::now();
-    std::vector<torch::jit::IValue> inputs = {obs_frame, obs_io_hist, vision_feat, hf_hist};
+    std::vector<torch::jit::IValue> inputs = {obs_frame_model, obs_io_hist_model, vision_feat, hf_hist_model};
     torch::jit::IValue out = this->nav_high_model_.forward(inputs);
     const double high_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - high_begin_tp).count();
     if (out.isTensor())
@@ -2410,6 +2474,14 @@ void RL_Real::RunHighLevel()
     if (!cmd.defined() || cmd.numel() < 3)
     {
         this->DisableNavigationWithError("output_validate", "invalid high-level output: command tensor missing or too short");
+    }
+    if (!cmd.device().is_cpu())
+    {
+        cmd = cmd.to(torch::kCPU, torch::kFloat32);
+    }
+    if (pred_target_body.defined() && !pred_target_body.device().is_cpu())
+    {
+        pred_target_body = pred_target_body.to(torch::kCPU, torch::kFloat32);
     }
 
     if (this->nav_perf_log_enable_)
