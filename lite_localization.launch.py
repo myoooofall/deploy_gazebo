@@ -1,64 +1,95 @@
-# voa_launch.py
-
-from launch import LaunchDescription
-from launch_ros.actions import Node
 import os
-from ament_index_python.packages import get_package_share_directory
+
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
-def launch_map_server():
-    declare_map_server_config_file_cmd = DeclareLaunchArgument(
-        'map_server_config_file',
-        default_value=os.path.join(
-            '/home/ysc/lite_cog_ros2/system/map/lite3.yaml'
-        )
-    )
+def _try_get_package_share(pkg_name: str) -> str:
+    try:
+        return get_package_share_directory(pkg_name)
+    except PackageNotFoundError:
+        return ""
+
+
+def _resolve_default_paths():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    ws_dir = os.path.dirname(script_dir)
+
+    env_map_pcd = os.environ.get("LITE3_MAP_PCD", "")
+    env_map_yaml = os.environ.get("LITE3_MAP_YAML", "")
+    env_rviz = os.environ.get("LITE3_RVIZ_CONFIG", "")
+
+    map_pcd_candidates = [
+        env_map_pcd,
+        os.path.join(ws_dir, "lite_cog_ros2", "system", "map", "lite3.pcd"),
+        "/home/ysc/lite_cog_ros2/system/map/lite3.pcd",
+    ]
+    map_yaml_candidates = [
+        env_map_yaml,
+        os.path.join(ws_dir, "lite_cog_ros2", "system", "map", "lite3.yaml"),
+        "/home/ysc/lite_cog_ros2/system/map/lite3.yaml",
+    ]
+    rviz_candidates = [
+        env_rviz,
+        os.path.join(script_dir, "src", "rl_sar", "rviz", "goal_only.rviz"),
+    ]
+
+    def first_existing(candidates):
+        for p in candidates:
+            if p and os.path.exists(p):
+                return p
+        return candidates[1] if len(candidates) > 1 else ""
+
+    map_pcd = first_existing(map_pcd_candidates)
+    map_yaml = first_existing(map_yaml_candidates)
+
+    dr_nav2_share = _try_get_package_share("dr_nav2")
+    if dr_nav2_share:
+        rviz_candidates.append(os.path.join(dr_nav2_share, "rviz", "dr_nav2.rviz"))
+    rviz_cfg = first_existing(rviz_candidates)
+    return map_pcd, map_yaml, rviz_cfg, dr_nav2_share
+
+
+def _launch_map_server(condition=None):
     map_server = Node(
-        package='nav2_map_server',
-        executable='map_server',
+        package="nav2_map_server",
+        executable="map_server",
+        condition=condition,
         parameters=[
-            {"yaml_filename": LaunchConfiguration('map_server_config_file')},
+            {"yaml_filename": LaunchConfiguration("map_server_config_file")},
             {"topic_name": "map"},
             {"frame_id": "map"},
+            {"use_sim_time": LaunchConfiguration("use_sim_time")},
         ],
     )
-    return declare_map_server_config_file_cmd, map_server
+    return map_server
 
-def launch_hdl_localization_composition():
-    hdl_localization_composition = Node(
-        package='hdl_localization',
-        executable='hdl_localization_composition',
-        # prefix=['xterm -e gdb -ex run --args'],
+
+def _launch_hdl_localization_composition():
+    return Node(
+        package="hdl_localization",
+        executable="hdl_localization_composition",
         parameters=[
-            {"globalmap_pcd": "/home/ysc/lite_cog_ros2/system/map/lite3.pcd"},
+            {"globalmap_pcd": LaunchConfiguration("map_path")},
+            {"use_sim_time": LaunchConfiguration("use_sim_time")},
             {"convert_utm_to_local": True},
-
             {"odom_child_frame_id": "base_link"},
-            # imu settings
-            # during "cool_time", imu inputs are ignored
             {"use_imu": True},
             {"invert_acc": False},
             {"invert_gyro": False},
             {"cool_time_duration": 2.0},
-            # robot odometry-based prediction
             {"enable_robot_odometry_prediction": False},
             {"robot_odom_frame_id": "odom"},
-            # ndt settings
-            # available reg_methods: NDT_OMP, NDT_CUDA_P2D, NDT_CUDA_D2D
-            {"reg_method": "NDT_OMP"},
-            # if NDT is slow for your PC, try DIRECT1 serach method, which is a bit unstable but extremely fast
+            {"reg_method": LaunchConfiguration("reg_method")},
             {"ndt_neighbor_search_method": "DIRECT1"},
             {"ndt_neighbor_search_radius": 3.0},
             {"ndt_resolution": 1.5},
-            {"downsample_resolution": 0.5},
-            # if "specify_init_pose" is true, pose estimator will be initialized with the following params
-            # otherwise, you need to input an initial pose with "2D Pose Estimate" on rviz"
+            {"downsample_resolution": LaunchConfiguration("downsample_resolution")},
             {"specify_init_pose": True},
             {"init_pos_x": 0.0},
             {"init_pos_y": 0.0},
@@ -67,77 +98,72 @@ def launch_hdl_localization_composition():
             {"init_ori_x": 0.0},
             {"init_ori_y": 0.0},
             {"init_ori_z": 0.0},
-
             {"use_global_localization": False},
-
-            {"t_diff": 0.25}
+            {"t_diff": LaunchConfiguration("t_diff")},
         ],
         remappings=[
-            ('/velodyne_points', '/rslidar_points'),
-            ('/gpsimu_driver/imu_data', '/imu/data'),
+            ("/velodyne_points", LaunchConfiguration("points_topic")),
+            ("/gpsimu_driver/imu_data", LaunchConfiguration("imu_topic")),
         ],
-        # prefix=['xterm -e gdb -ex run --args'],
     )
-    return hdl_localization_composition
 
-def launch_nav2(enable_nav2):
-    included_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory("dr_nav2"), "launch", "dr_nav2.launch.py")
-        ),
-        condition=IfCondition(enable_nav2)
+
+def _launch_rviz():
+    return Node(
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("enable_rviz")),
+        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        arguments=["-d", LaunchConfiguration("rviz_config")],
     )
-    return included_launch
 
-def launch_plot_status_py():
-    return
 
-def launch_rviz():
-    rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        output='screen',
-        parameters=[{'use_sim_time': False}],  # RViz 默认参数，可根据需要修改
-        arguments=['-d', os.path.join(get_package_share_directory('dr_nav2'), 'rviz', 'dr_nav2.rviz')]
+def _launch_base2lidar_tf():
+    return Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="base2lidar_tf_broadcaster",
+        condition=IfCondition(LaunchConfiguration("publish_base2lidar_tf")),
+        arguments=["0.16", "0.0", "0.47", "1.57", "0.0", "0.0", "base_link", "rslidar"],
     )
-    return rviz
 
-def launch_base2lidar_tf_broadcaster():
-    base2lidar_tf_broadcaste = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='base2lidar_tf_broadcaste',
-        arguments=['0.16', '0.0', '0.47', '1.57', '0.0', '0.0', 'base_link', 'rslidar']
-    )
-    return base2lidar_tf_broadcaste
-
-
-plot_estimation_errors = False
-debug = False
 
 def generate_launch_description():
+    default_map_pcd, default_map_yaml, default_rviz, dr_nav2_share = _resolve_default_paths()
+
     ld = LaunchDescription()
-    declare_enable_nav2_cmd = DeclareLaunchArgument("enable_nav2", default_value="false", description="Enable Nav2 bringup (controller/planner stack)")
-    ld.add_action(declare_enable_nav2_cmd)
+    ld.add_action(DeclareLaunchArgument("enable_nav2", default_value="false"))
+    ld.add_action(DeclareLaunchArgument("enable_rviz", default_value="false"))
+    ld.add_action(DeclareLaunchArgument("enable_map_server", default_value="false"))
+    ld.add_action(DeclareLaunchArgument("publish_base2lidar_tf", default_value="true"))
+    ld.add_action(DeclareLaunchArgument("use_sim_time", default_value="false"))
 
-    hdl_localization_composition = launch_hdl_localization_composition()
-    ld.add_action(hdl_localization_composition)
+    ld.add_action(DeclareLaunchArgument("map_path", default_value=default_map_pcd))
+    ld.add_action(DeclareLaunchArgument("map_server_config_file", default_value=default_map_yaml))
+    ld.add_action(DeclareLaunchArgument("rviz_config", default_value=default_rviz))
 
-    if debug:
-        declare_map_server_config_file_cmd, map_server = launch_map_server()
-        ld.add_action(declare_map_server_config_file_cmd)
-        ld.add_action(map_server)
+    ld.add_action(DeclareLaunchArgument("reg_method", default_value="NDT_OMP"))
+    ld.add_action(DeclareLaunchArgument("downsample_resolution", default_value="0.5"))
+    ld.add_action(DeclareLaunchArgument("t_diff", default_value="0.25"))
+    ld.add_action(DeclareLaunchArgument("points_topic", default_value="/rslidar_points"))
+    ld.add_action(DeclareLaunchArgument("imu_topic", default_value="/imu/data"))
 
-        rviz = launch_rviz()
-        ld.add_action(rviz)
+    ld.add_action(_launch_hdl_localization_composition())
+    ld.add_action(_launch_base2lidar_tf())
+
+    if dr_nav2_share:
+        ld.add_action(
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(dr_nav2_share, "launch", "dr_nav2.launch.py")),
+                condition=IfCondition(LaunchConfiguration("enable_nav2")),
+            )
+        )
     else:
-        nav2 = launch_nav2(LaunchConfiguration("enable_nav2"))
-        ld.add_action(nav2)
+        ld.add_action(LogInfo(msg="[lite_localization] dr_nav2 not found, enable_nav2 will be ignored."))
 
-    if plot_estimation_errors:
-        pass
+    ld.add_action(_launch_map_server(condition=IfCondition(LaunchConfiguration("enable_map_server"))))
 
+    ld.add_action(_launch_rviz())
     return ld
-
-

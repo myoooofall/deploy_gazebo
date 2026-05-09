@@ -18,19 +18,23 @@ lite3/navi:
   clip_commands_vy: 0.5
   clip_commands_w: 1.0
   watchdog_timeout_ms: 3000
-  # Runtime console log policy (to reduce scheduling jitter on NX):
-  # keep only [NAV][PERF] periodic summary by default.
-  console_info_enable: false
-  loop_overrun_log_enable: false
-  loop_lifecycle_log_enable: false
-  depth_console_log_enable: false
-  perf_log_enable: true
-  perf_log_interval_s: 1.0
+  # Runtime diagnostics. Keep false on NX realtime runs unless collecting timing data.
+  # This one switch controls terminal diagnostics: console info, perf summaries,
+  # loop overrun logs, lifecycle logs, and depth console logs.
   debug_enable: false
   debug_log_interval_s: 1.0
-  # Structured semantic observation logger (CSV): enabled during navigation.
+  # Retroid gamepad thread is unused on the NX navigation deployment; keep off unless needed.
+  gamepad_enable: false
+  # Extra depth image topics change runtime load, so this stays separate from debug_enable.
+  depth_debug_publish_enable: false
+  # Structured timing CSV for comparing "navigation only" vs "navigation + rosbag".
+  # Default path is <rl_sar>/logs/perf when perf_csv_dir is empty.
+  perf_csv_enable: false
+  perf_csv_flush_interval_s: 1.0
+  perf_csv_dir: ""
+  # Structured semantic observation logger (CSV): keep disabled on NX realtime runs.
   # Default path is <rl_sar>/logs/nav_obs when obs_log_dir is empty.
-  obs_log_enable: true
+  obs_log_enable: false
   obs_log_interval_s: 0.1
   obs_log_dir: ""
   # Lite3 SDK reports angular_velocity_{roll,pitch,yaw}; interpret as Euler rates

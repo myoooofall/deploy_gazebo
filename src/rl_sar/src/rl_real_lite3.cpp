@@ -250,10 +250,16 @@ RL_Real::RL_Real()
     this->receiver_->StartWork();
     this->robot_data_ = &(receiver_->GetState());
 
-    // init gamepad
-    this->gamepad_ptr_ = std::make_shared<RetroidGamepad>(12121);
+    // init hierarchical nav config/models before optional runtime components.
+    this->InitHierarchicalNav();
+
+    // init gamepad only when explicitly enabled; the NX deployment normally uses keyboard/ROS goals.
     this->first_flag_ = true;
-    this->gamepad_ptr_->StartDataThread();
+    if (this->nav_gamepad_enable_)
+    {
+        this->gamepad_ptr_ = std::make_shared<RetroidGamepad>(12121);
+        this->gamepad_ptr_->StartDataThread();
+    }
 
 #if defined(USE_ROS2)
     // hierarchical navigation: body-frame goal only (no odom dependency)
@@ -265,10 +271,13 @@ RL_Real::RL_Real()
     this->depth_image_subscriber = this->create_subscription<sensor_msgs::msg::Image>(
         "/camera/depth/image_rect_raw", rclcpp::SensorDataQoS().keep_last(1),
         std::bind(&RL_Real::DepthImageCallback, this, std::placeholders::_1));
-    this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
-        "/camera/depth/processed", rclcpp::SystemDefaultsQoS());
-    this->processed_depth_norm_publisher = this->create_publisher<sensor_msgs::msg::Image>(
-        "/camera/depth/processed_norm", rclcpp::SystemDefaultsQoS());
+    if (this->nav_depth_debug_publish_enable_)
+    {
+        this->processed_depth_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+            "/camera/depth/processed", rclcpp::SystemDefaultsQoS());
+        this->processed_depth_norm_publisher = this->create_publisher<sensor_msgs::msg::Image>(
+            "/camera/depth/processed_norm", rclcpp::SystemDefaultsQoS());
+    }
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
 
     this->sdk_imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
@@ -278,7 +287,8 @@ RL_Real::RL_Real()
     {
         std::cout << LOGGER::INFO
                   << "[NAV][DEPTH] subscribe=/camera/depth/image_rect_raw (cache_latest) "
-                  << "publish=/camera/depth/processed,/camera/depth/processed_norm (loop_vision@nav_dt)"
+                  << "debug_publish=" << (this->nav_depth_debug_publish_enable_ ? "ON" : "OFF")
+                  << " (loop_vision@nav_dt)"
                   << '\n';
         std::cout << LOGGER::INFO
                   << "[SLAM][SDK2ROS] publish=/imu/data (sensor_msgs/Imu, source=lite3_sdk)"
@@ -287,6 +297,9 @@ RL_Real::RL_Real()
 
     this->odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
         "/Odometry", rclcpp::SystemDefaultsQoS(),
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->OdomCallback(msg); });
+    this->odom_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/odom", rclcpp::SystemDefaultsQoS(),
         [this](const nav_msgs::msg::Odometry::SharedPtr msg) { this->OdomCallback(msg); });
 
     this->nav_goal_actual_map_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
@@ -305,13 +318,10 @@ RL_Real::RL_Real()
     if (this->nav_console_info_enable_)
     {
         std::cout << LOGGER::INFO
-                  << "[NAV][COMPARE] subscribe=/Odometry publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body,/nav/cmd_high,/nav/cmd_applied} (fallback: body-frame on same goal topics when /Odometry is absent)"
+                  << "[NAV][COMPARE] subscribe={/Odometry,/odom} publish={/nav/goal_actual_map,/nav/goal_pred_map,/nav/goal_compare_markers,/nav/goal_error_body,/nav/cmd_high,/nav/cmd_applied} (fallback: body-frame on same goal topics when both odom topics are absent)"
                   << '\n';
     }
 #endif
-
-    // init hierarchical nav policy (required)
-    this->InitHierarchicalNav();
 
     // loop
     this->loop_udpRecv = std::make_shared<LoopFunc>("loop_udpRecv", 0.002, std::bind(&RL_Real::UDPRecv, this), 3);
@@ -355,89 +365,100 @@ RL_Real::~RL_Real()
     this->loop_vision->shutdown();
 #endif
     this->loop_navi->shutdown();
-    this->gamepad_ptr_->StopDataThread();
+    if (this->gamepad_ptr_)
+    {
+        this->gamepad_ptr_->StopDataThread();
+    }
 #ifdef PLOT
     this->loop_plot->shutdown();
 #endif
     this->StopNavObsLogIfNeeded();
+    this->StopPerfCsvIfNeeded();
     std::cout << LOGGER::INFO << "RL_Real exit" << std::endl;
 }
 
 void RL_Real::GetState(RobotState<double> *state)
 {
-    this->rt_keys_ = this->gamepad_ptr_->GetKeys();
-    if(this->first_flag_){
-        this->rt_keys_record_ = this->rt_keys_;
-        this->first_flag_ = false;
-    }
-    if (this->rt_keys_.A != this->rt_keys_record_.A) this->control.SetGamepad(Input::Gamepad::A);
-    if (this->rt_keys_.B != this->rt_keys_record_.B) this->control.SetGamepad(Input::Gamepad::B);
-    if (this->rt_keys_.X != this->rt_keys_record_.X) this->control.SetGamepad(Input::Gamepad::X);
-    if (this->rt_keys_.Y != this->rt_keys_record_.Y) this->control.SetGamepad(Input::Gamepad::Y);
-    if (this->rt_keys_.L1 != this->rt_keys_record_.L1) this->control.SetGamepad(Input::Gamepad::LB);
-    if (this->rt_keys_.L2 != this->rt_keys_record_.L2) this->control.SetGamepad(Input::Gamepad::L2);
-    if (this->rt_keys_.R1 != this->rt_keys_record_.R1) this->control.SetGamepad(Input::Gamepad::RB);
-    if (this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button) this->control.SetGamepad(Input::Gamepad::LStick);
-    if (this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button) this->control.SetGamepad(Input::Gamepad::RStick);
-    if (this->rt_keys_.up != this->rt_keys_record_.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
-    if (this->rt_keys_.down != this->rt_keys_record_.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
-    if (this->rt_keys_.left != this->rt_keys_record_.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
-    if (this->rt_keys_.right != this->rt_keys_record_.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.A != this->rt_keys_record_.A)) this->control.SetGamepad(Input::Gamepad::LB_A);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.B != this->rt_keys_record_.B)) this->control.SetGamepad(Input::Gamepad::LB_B);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.X != this->rt_keys_record_.X)) this->control.SetGamepad(Input::Gamepad::LB_X);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.Y != this->rt_keys_record_.Y)) this->control.SetGamepad(Input::Gamepad::LB_Y);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button)) this->control.SetGamepad(Input::Gamepad::LB_LStick);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button)) this->control.SetGamepad(Input::Gamepad::LB_RStick);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.up != this->rt_keys_record_.up)) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.A != this->rt_keys_record_.A)) this->control.SetGamepad(Input::Gamepad::RB_A);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.B != this->rt_keys_record_.B)) this->control.SetGamepad(Input::Gamepad::RB_B);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.X != this->rt_keys_record_.X)) this->control.SetGamepad(Input::Gamepad::RB_X);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.Y != this->rt_keys_record_.Y)) this->control.SetGamepad(Input::Gamepad::RB_Y);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button)) this->control.SetGamepad(Input::Gamepad::RB_LStick);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button)) this->control.SetGamepad(Input::Gamepad::RB_RStick);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.up != this->rt_keys_record_.up)) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
-    if (this->rt_keys_.L1 && this->rt_keys_.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
-
-    if (!this->nav_enabled_.load())
+    if (this->nav_gamepad_enable_ && this->gamepad_ptr_)
     {
-        // Allow keyboard and joystick to coexist:
-        // only override command with joystick when the stick leaves deadzone.
-        constexpr double kStickDeadzone = 0.08;
-        const double joy_x = static_cast<double>(this->rt_keys_.left_axis_y);
-        const double joy_y = -static_cast<double>(this->rt_keys_.left_axis_x);
-        const double joy_yaw = -static_cast<double>(this->rt_keys_.right_axis_x);
-        const bool joy_active = (std::fabs(joy_x) > kStickDeadzone) ||
-                                (std::fabs(joy_y) > kStickDeadzone) ||
-                                (std::fabs(joy_yaw) > kStickDeadzone);
-        if (joy_active)
-        {
-            // Map normalized joystick input [-1, 1] to configured command range.
-            this->control.x = joy_x * this->params.cmd_clip_x;
-            this->control.y = joy_y * this->params.cmd_clip_y;
-            this->control.yaw = joy_yaw * this->params.cmd_clip_yaw;
-            this->joystick_override_active_ = true;
+        this->rt_keys_ = this->gamepad_ptr_->GetKeys();
+        if(this->first_flag_){
+            this->rt_keys_record_ = this->rt_keys_;
+            this->first_flag_ = false;
         }
-        else if (this->joystick_override_active_)
+        if (this->rt_keys_.A != this->rt_keys_record_.A) this->control.SetGamepad(Input::Gamepad::A);
+        if (this->rt_keys_.B != this->rt_keys_record_.B) this->control.SetGamepad(Input::Gamepad::B);
+        if (this->rt_keys_.X != this->rt_keys_record_.X) this->control.SetGamepad(Input::Gamepad::X);
+        if (this->rt_keys_.Y != this->rt_keys_record_.Y) this->control.SetGamepad(Input::Gamepad::Y);
+        if (this->rt_keys_.L1 != this->rt_keys_record_.L1) this->control.SetGamepad(Input::Gamepad::LB);
+        if (this->rt_keys_.L2 != this->rt_keys_record_.L2) this->control.SetGamepad(Input::Gamepad::L2);
+        if (this->rt_keys_.R1 != this->rt_keys_record_.R1) this->control.SetGamepad(Input::Gamepad::RB);
+        if (this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button) this->control.SetGamepad(Input::Gamepad::LStick);
+        if (this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button) this->control.SetGamepad(Input::Gamepad::RStick);
+        if (this->rt_keys_.up != this->rt_keys_record_.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
+        if (this->rt_keys_.down != this->rt_keys_record_.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
+        if (this->rt_keys_.left != this->rt_keys_record_.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
+        if (this->rt_keys_.right != this->rt_keys_record_.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.A != this->rt_keys_record_.A)) this->control.SetGamepad(Input::Gamepad::LB_A);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.B != this->rt_keys_record_.B)) this->control.SetGamepad(Input::Gamepad::LB_B);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.X != this->rt_keys_record_.X)) this->control.SetGamepad(Input::Gamepad::LB_X);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.Y != this->rt_keys_record_.Y)) this->control.SetGamepad(Input::Gamepad::LB_Y);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button)) this->control.SetGamepad(Input::Gamepad::LB_LStick);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button)) this->control.SetGamepad(Input::Gamepad::LB_RStick);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.up != this->rt_keys_record_.up)) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
+        if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.A != this->rt_keys_record_.A)) this->control.SetGamepad(Input::Gamepad::RB_A);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.B != this->rt_keys_record_.B)) this->control.SetGamepad(Input::Gamepad::RB_B);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.X != this->rt_keys_record_.X)) this->control.SetGamepad(Input::Gamepad::RB_X);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.Y != this->rt_keys_record_.Y)) this->control.SetGamepad(Input::Gamepad::RB_Y);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button)) this->control.SetGamepad(Input::Gamepad::RB_LStick);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button)) this->control.SetGamepad(Input::Gamepad::RB_RStick);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.up != this->rt_keys_record_.up)) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
+        if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
+        if (this->rt_keys_.L1 && this->rt_keys_.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
+
+        if (!this->nav_enabled_.load())
         {
-            // Stick returned to neutral after taking control: clear once to avoid stale velocity.
-            this->control.x = 0.0;
-            this->control.y = 0.0;
-            this->control.yaw = 0.0;
+            // Allow keyboard and joystick to coexist:
+            // only override command with joystick when the stick leaves deadzone.
+            constexpr double kStickDeadzone = 0.08;
+            const double joy_x = static_cast<double>(this->rt_keys_.left_axis_y);
+            const double joy_y = -static_cast<double>(this->rt_keys_.left_axis_x);
+            const double joy_yaw = -static_cast<double>(this->rt_keys_.right_axis_x);
+            const bool joy_active = (std::fabs(joy_x) > kStickDeadzone) ||
+                                    (std::fabs(joy_y) > kStickDeadzone) ||
+                                    (std::fabs(joy_yaw) > kStickDeadzone);
+            if (joy_active)
+            {
+                // Map normalized joystick input [-1, 1] to configured command range.
+                this->control.x = joy_x * this->params.cmd_clip_x;
+                this->control.y = joy_y * this->params.cmd_clip_y;
+                this->control.yaw = joy_yaw * this->params.cmd_clip_yaw;
+                this->joystick_override_active_ = true;
+            }
+            else if (this->joystick_override_active_)
+            {
+                // Stick returned to neutral after taking control: clear once to avoid stale velocity.
+                this->control.x = 0.0;
+                this->control.y = 0.0;
+                this->control.yaw = 0.0;
+                this->joystick_override_active_ = false;
+            }
+        }
+        else
+        {
             this->joystick_override_active_ = false;
         }
+        this->rt_keys_record_ = this->rt_keys_;
     }
     else
     {
         this->joystick_override_active_ = false;
     }
-    this->rt_keys_record_ = this->rt_keys_;
        
     float q[4];
     EulerToQuaternion(this->robot_data_->imu.angle_roll, this->robot_data_->imu.angle_pitch, this->robot_data_->imu.angle_yaw, q);
@@ -579,6 +600,151 @@ void RL_Real::SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, cons
     throw std::runtime_error(msg);
 }
 
+void RL_Real::StartPerfCsvIfNeeded()
+{
+    if (!this->nav_perf_csv_enable_)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(this->nav_perf_csv_mutex_);
+    if (this->nav_perf_csv_stream_.is_open())
+    {
+        return;
+    }
+
+    std::string log_dir = this->nav_perf_csv_dir_;
+    if (log_dir.empty())
+    {
+        log_dir = std::string(CMAKE_CURRENT_SOURCE_DIR) + "/logs/perf";
+    }
+
+    std::string mkdir_err;
+    if (!EnsureDirExistsRecursive(log_dir, &mkdir_err))
+    {
+        log_dir = "/tmp/rl_sar_perf";
+        mkdir_err.clear();
+        EnsureDirExistsRecursive(log_dir, &mkdir_err);
+    }
+    if (!mkdir_err.empty())
+    {
+        std::cout << LOGGER::WARNING
+                  << "[PERFCSV] failed to create log dir: " << log_dir
+                  << " err=" << mkdir_err
+                  << std::endl;
+        this->nav_perf_csv_enable_ = false;
+        return;
+    }
+
+    auto now_sys = std::chrono::system_clock::now();
+    std::time_t now_tt = std::chrono::system_clock::to_time_t(now_sys);
+    std::tm tm_buf{};
+    localtime_r(&now_tt, &tm_buf);
+    std::ostringstream ts_oss;
+    ts_oss << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
+
+    std::ostringstream file_oss;
+    file_oss << log_dir << "/rl_real_perf_" << ts_oss.str() << ".csv";
+    this->nav_perf_csv_path_ = file_oss.str();
+    this->nav_perf_csv_stream_.open(this->nav_perf_csv_path_, std::ios::out | std::ios::trunc);
+    if (!this->nav_perf_csv_stream_.is_open())
+    {
+        std::cout << LOGGER::WARNING
+                  << "[PERFCSV] failed to open: " << this->nav_perf_csv_path_
+                  << std::endl;
+        this->nav_perf_csv_path_.clear();
+        this->nav_perf_csv_enable_ = false;
+        return;
+    }
+
+    this->nav_perf_csv_start_tp_ = std::chrono::steady_clock::now();
+    this->nav_perf_csv_last_flush_tp_ = this->nav_perf_csv_start_tp_;
+    this->nav_perf_csv_stream_
+        << "steady_time_s,event,nav_enabled,rl_init_done,"
+        << "dt_ms,exec_ms,"
+        << "sdk_imu_stamp_ms,sdk_imu_stamp_delta_ms,"
+        << "imu_pub_dt_ms,imu_header_stamp_ms,imu_header_delta_ms,"
+        << "rl_tick_ms,rl_infer_ms,rl_total_ms,"
+        << "vision_tick_ms,vision_process_ms,"
+        << "nav_tick_ms,nav_vision_ms,nav_high_ms,nav_total_ms\n";
+    this->nav_perf_csv_stream_.flush();
+
+    std::cout << LOGGER::INFO
+              << "[PERFCSV] started path=" << this->nav_perf_csv_path_
+              << std::endl;
+}
+
+void RL_Real::StopPerfCsvIfNeeded()
+{
+    std::lock_guard<std::mutex> lock(this->nav_perf_csv_mutex_);
+    if (this->nav_perf_csv_stream_.is_open())
+    {
+        this->nav_perf_csv_stream_.flush();
+        this->nav_perf_csv_stream_.close();
+    }
+}
+
+void RL_Real::WritePerfCsvRow(
+    const char *event,
+    double dt_ms,
+    double exec_ms,
+    double sdk_imu_stamp_ms,
+    double sdk_imu_stamp_delta_ms,
+    double imu_pub_dt_ms,
+    double imu_header_stamp_ms,
+    double imu_header_delta_ms,
+    double rl_tick_ms,
+    double rl_infer_ms,
+    double rl_total_ms,
+    double vision_tick_ms,
+    double vision_process_ms,
+    double nav_tick_ms,
+    double nav_vision_ms,
+    double nav_high_ms,
+    double nav_total_ms)
+{
+    if (!this->nav_perf_csv_enable_)
+    {
+        return;
+    }
+
+    const auto now_tp = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(this->nav_perf_csv_mutex_);
+    if (!this->nav_perf_csv_stream_.is_open())
+    {
+        return;
+    }
+
+    const double steady_time_s = std::chrono::duration<double>(now_tp - this->nav_perf_csv_start_tp_).count();
+    this->nav_perf_csv_stream_ << std::fixed << std::setprecision(6)
+        << steady_time_s << ","
+        << (event ? event : "unknown") << ","
+        << (this->nav_enabled_.load() ? 1 : 0) << ","
+        << (this->rl_init_done ? 1 : 0) << ","
+        << dt_ms << ","
+        << exec_ms << ","
+        << sdk_imu_stamp_ms << ","
+        << sdk_imu_stamp_delta_ms << ","
+        << imu_pub_dt_ms << ","
+        << imu_header_stamp_ms << ","
+        << imu_header_delta_ms << ","
+        << rl_tick_ms << ","
+        << rl_infer_ms << ","
+        << rl_total_ms << ","
+        << vision_tick_ms << ","
+        << vision_process_ms << ","
+        << nav_tick_ms << ","
+        << nav_vision_ms << ","
+        << nav_high_ms << ","
+        << nav_total_ms << "\n";
+
+    if (std::chrono::duration<double>(now_tp - this->nav_perf_csv_last_flush_tp_).count() >= this->nav_perf_csv_flush_interval_s_)
+    {
+        this->nav_perf_csv_stream_.flush();
+        this->nav_perf_csv_last_flush_tp_ = now_tp;
+    }
+}
+
 void RL_Real::StartNavGoalInput()
 {
     if (this->nav_goal_input_active_.exchange(true))
@@ -634,6 +800,17 @@ void RL_Real::RobotControl()
     static uint64_t last_nav_hl_beat_seq = 0;
     static SteadyClock::time_point last_nav_hl_beat_tp{};
     static SteadyClock::time_point last_stale_warn_tp{};
+    static bool perf_has_last_tick = false;
+    static SteadyClock::time_point perf_last_tick_tp;
+
+    const auto cycle_begin_tp = SteadyClock::now();
+    double tick_ms = std::numeric_limits<double>::quiet_NaN();
+    if (perf_has_last_tick)
+    {
+        tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
+    }
+    perf_last_tick_tp = cycle_begin_tp;
+    perf_has_last_tick = true;
 
     if (this->nav_enabled_.load())
     {
@@ -783,6 +960,9 @@ void RL_Real::RobotControl()
 
     this->StateController(&this->robot_state, &this->robot_command);
     this->SetCommand(&this->robot_command);
+
+    const double exec_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
+    this->WritePerfCsvRow("control", tick_ms, exec_ms);
 }
 
 void RL_Real::RunModel()
@@ -809,6 +989,7 @@ void RL_Real::RunModel()
 
         const auto cycle_begin_tp = SteadyClock::now();
         const double loop_budget_ms = this->params.dt * this->params.decimation * 1000.0;
+        double tick_ms = std::numeric_limits<double>::quiet_NaN();
         if (!perf_inited)
         {
             perf_last_report_tp = cycle_begin_tp;
@@ -817,7 +998,7 @@ void RL_Real::RunModel()
 
         if (perf_has_last_tick)
         {
-            const double tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
+            tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
             perf_sum_tick_ms += tick_ms;
             perf_max_tick_ms = std::max(perf_max_tick_ms, tick_ms);
             perf_tick_samples += 1;
@@ -895,6 +1076,18 @@ void RL_Real::RunModel()
         const auto cycle_end_tp = SteadyClock::now();
         const double infer_ms = std::chrono::duration<double, std::milli>(infer_end_tp - infer_begin_tp).count();
         const double total_ms = std::chrono::duration<double, std::milli>(cycle_end_tp - cycle_begin_tp).count();
+        this->WritePerfCsvRow(
+            "rl_model",
+            tick_ms,
+            total_ms,
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            tick_ms,
+            infer_ms,
+            total_ms);
         perf_sum_infer_ms += infer_ms;
         perf_sum_total_ms += total_ms;
         perf_max_infer_ms = std::max(perf_max_infer_ms, infer_ms);
@@ -907,6 +1100,24 @@ void RL_Real::RunModel()
 
         if (std::chrono::duration<double>(cycle_end_tp - perf_last_report_tp).count() >= 1.0 && perf_samples > 0)
         {
+            if (this->nav_perf_log_enable_)
+            {
+                const double avg_infer_ms = perf_sum_infer_ms / static_cast<double>(perf_samples);
+                const double avg_total_ms = perf_sum_total_ms / static_cast<double>(perf_samples);
+                const double avg_tick_ms = (perf_tick_samples > 0)
+                    ? perf_sum_tick_ms / static_cast<double>(perf_tick_samples)
+                    : 0.0;
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(2)
+                    << "[RL][PERF] samples=" << perf_samples
+                    << " budget_ms=" << loop_budget_ms
+                    << " infer_ms(avg/max)=[" << avg_infer_ms << "/" << perf_max_infer_ms << "]"
+                    << " total_ms(avg/max)=[" << avg_total_ms << "/" << perf_max_total_ms << "]"
+                    << " tick_ms(avg/max)=[" << avg_tick_ms << "/" << perf_max_tick_ms << "]"
+                    << " infer_over_budget=" << perf_over_budget;
+                std::cout << LOGGER::INFO << oss.str() << '\n';
+            }
+
             perf_sum_infer_ms = 0.0;
             perf_sum_total_ms = 0.0;
             perf_sum_tick_ms = 0.0;
@@ -975,10 +1186,50 @@ void RL_Real::Plot()
 
 void RL_Real::UDPRecv()
 {
+    using SteadyClock = std::chrono::steady_clock;
+    static bool perf_has_last_tick = false;
+    static SteadyClock::time_point perf_last_tick_tp;
+    static bool perf_has_last_sdk_stamp = false;
+    static int64_t perf_last_sdk_stamp_ms = 0;
+
+    const auto cycle_begin_tp = SteadyClock::now();
+    double tick_ms = std::numeric_limits<double>::quiet_NaN();
+    if (perf_has_last_tick)
+    {
+        tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
+    }
+    perf_last_tick_tp = cycle_begin_tp;
+    perf_has_last_tick = true;
+
     if (receiver_)
     {
         robot_data_ = &(receiver_->GetState());
     }
+
+    double sdk_stamp_ms = std::numeric_limits<double>::quiet_NaN();
+    double sdk_delta_ms = std::numeric_limits<double>::quiet_NaN();
+    if (this->robot_data_ != nullptr)
+    {
+        const int64_t stamp_ms = static_cast<int64_t>(this->robot_data_->imu.timestamp);
+        sdk_stamp_ms = static_cast<double>(stamp_ms);
+        if (stamp_ms > 0 && perf_has_last_sdk_stamp)
+        {
+            sdk_delta_ms = static_cast<double>(stamp_ms - perf_last_sdk_stamp_ms);
+        }
+        if (stamp_ms > 0)
+        {
+            perf_last_sdk_stamp_ms = stamp_ms;
+            perf_has_last_sdk_stamp = true;
+        }
+    }
+
+    const double exec_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
+    this->WritePerfCsvRow(
+        "udp_recv",
+        tick_ms,
+        exec_ms,
+        sdk_stamp_ms,
+        sdk_delta_ms);
 }
 
 void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
@@ -1007,6 +1258,21 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
     {
         return;
     }
+
+    using SteadyClock = std::chrono::steady_clock;
+    static bool perf_has_last_pub = false;
+    static SteadyClock::time_point perf_last_pub_tp;
+    static bool perf_has_last_header = false;
+    static double perf_last_header_stamp_ms = 0.0;
+
+    const auto cycle_begin_tp = SteadyClock::now();
+    double pub_dt_ms = std::numeric_limits<double>::quiet_NaN();
+    if (perf_has_last_pub)
+    {
+        pub_dt_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_pub_tp).count();
+    }
+    perf_last_pub_tp = cycle_begin_tp;
+    perf_has_last_pub = true;
 
     sensor_msgs::msg::Imu imu_msg;
     // Use Lite3 SDK IMU timestamp (ms) so IMU/LiDAR stay in the same time domain.
@@ -1038,6 +1304,28 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
 
     this->sdk_imu_publisher_->publish(imu_msg);
 
+    const double header_stamp_ms =
+        static_cast<double>(imu_msg.header.stamp.sec) * 1000.0 +
+        static_cast<double>(imu_msg.header.stamp.nanosec) / 1000000.0;
+    double header_delta_ms = std::numeric_limits<double>::quiet_NaN();
+    if (perf_has_last_header)
+    {
+        header_delta_ms = header_stamp_ms - perf_last_header_stamp_ms;
+    }
+    perf_last_header_stamp_ms = header_stamp_ms;
+    perf_has_last_header = true;
+
+    const double exec_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
+    this->WritePerfCsvRow(
+        "imu_pub",
+        pub_dt_ms,
+        exec_ms,
+        static_cast<double>(imu_stamp_ms),
+        header_delta_ms,
+        pub_dt_ms,
+        header_stamp_ms,
+        header_delta_ms);
+
     if (this->sdk_imu_pub_started_ == false)
     {
         this->sdk_imu_pub_started_ = true;
@@ -1060,6 +1348,18 @@ void RL_Real::DepthImageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 void RL_Real::RunVision()
 {
     using SteadyClock = std::chrono::steady_clock;
+    static bool perf_has_last_tick = false;
+    static SteadyClock::time_point perf_last_tick_tp;
+
+    const auto cycle_begin_tp = SteadyClock::now();
+    double tick_ms = std::numeric_limits<double>::quiet_NaN();
+    if (perf_has_last_tick)
+    {
+        tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
+    }
+    perf_last_tick_tp = cycle_begin_tp;
+    perf_has_last_tick = true;
+
     sensor_msgs::msg::Image::SharedPtr latest_msg;
     {
         std::lock_guard<std::mutex> lock(this->depth_raw_msg_mutex_);
@@ -1068,14 +1368,29 @@ void RL_Real::RunVision()
 
     if (!latest_msg)
     {
+        const double exec_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
+        this->WritePerfCsvRow(
+            "vision_no_msg",
+            tick_ms,
+            exec_ms,
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            tick_ms,
+            std::numeric_limits<double>::quiet_NaN());
         return;
     }
 
     const auto proc_begin_tp = SteadyClock::now();
     torch::Tensor processed_depth = depth_buffer.process_depth_image(
         latest_msg,
-        this->processed_depth_publisher,
-        this->processed_depth_norm_publisher);
+        this->nav_depth_debug_publish_enable_ ? this->processed_depth_publisher : nullptr,
+        this->nav_depth_debug_publish_enable_ ? this->processed_depth_norm_publisher : nullptr);
     {
         std::lock_guard<std::mutex> lock(this->depth_buffer_mutex_);
         // processed_depth shape: [30, 43], insert函数会处理batch维度
@@ -1095,6 +1410,21 @@ void RL_Real::RunVision()
     }
 
     (void)proc_ms;
+    const double exec_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
+    this->WritePerfCsvRow(
+        "vision",
+        tick_ms,
+        exec_ms,
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        tick_ms,
+        proc_ms);
 }
 
 void RL_Real::NavGoalBodyCallback(const geometry_msgs::msg::Pose2D::SharedPtr msg)
@@ -1867,31 +2197,6 @@ bool RL_Real::InitHierarchicalNav()
         const int timeout_ms = config["watchdog_timeout_ms"].as<int>();
         this->nav_watchdog_timeout_ms_ = (timeout_ms > 0) ? timeout_ms : 1200;
     }
-    if (config["perf_log_enable"])
-    {
-        this->nav_perf_log_enable_ = config["perf_log_enable"].as<bool>();
-    }
-    if (config["perf_log_interval_s"])
-    {
-        const double interval_s = config["perf_log_interval_s"].as<double>();
-        this->nav_perf_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
-    }
-    if (config["console_info_enable"])
-    {
-        this->nav_console_info_enable_ = config["console_info_enable"].as<bool>();
-    }
-    if (config["loop_overrun_log_enable"])
-    {
-        this->nav_loop_overrun_log_enable_ = config["loop_overrun_log_enable"].as<bool>();
-    }
-    if (config["loop_lifecycle_log_enable"])
-    {
-        this->nav_loop_lifecycle_log_enable_ = config["loop_lifecycle_log_enable"].as<bool>();
-    }
-    if (config["depth_console_log_enable"])
-    {
-        this->nav_depth_console_log_enable_ = config["depth_console_log_enable"].as<bool>();
-    }
     if (config["debug_enable"])
     {
         this->nav_debug_enable_ = config["debug_enable"].as<bool>();
@@ -1900,6 +2205,33 @@ bool RL_Real::InitHierarchicalNav()
     {
         const double interval_s = config["debug_log_interval_s"].as<double>();
         this->nav_debug_log_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
+    }
+    this->nav_perf_log_interval_s_ = this->nav_debug_log_interval_s_;
+    this->nav_console_info_enable_ = this->nav_debug_enable_;
+    this->nav_loop_overrun_log_enable_ = this->nav_debug_enable_;
+    this->nav_loop_lifecycle_log_enable_ = this->nav_debug_enable_;
+    this->nav_depth_console_log_enable_ = this->nav_debug_enable_;
+    this->nav_perf_log_enable_ = this->nav_debug_enable_;
+    if (config["depth_debug_publish_enable"])
+    {
+        this->nav_depth_debug_publish_enable_ = config["depth_debug_publish_enable"].as<bool>();
+    }
+    if (config["gamepad_enable"])
+    {
+        this->nav_gamepad_enable_ = config["gamepad_enable"].as<bool>();
+    }
+    if (config["perf_csv_enable"])
+    {
+        this->nav_perf_csv_enable_ = config["perf_csv_enable"].as<bool>();
+    }
+    if (config["perf_csv_flush_interval_s"])
+    {
+        const double interval_s = config["perf_csv_flush_interval_s"].as<double>();
+        this->nav_perf_csv_flush_interval_s_ = (interval_s > 0.0) ? interval_s : 1.0;
+    }
+    if (config["perf_csv_dir"])
+    {
+        this->nav_perf_csv_dir_ = config["perf_csv_dir"].as<std::string>();
     }
     if (config["obs_log_enable"])
     {
@@ -1942,6 +2274,7 @@ bool RL_Real::InitHierarchicalNav()
     LoopFunc::SetOverrunLogEnabled(this->nav_loop_overrun_log_enable_);
     LoopFunc::SetLifecycleLogEnabled(this->nav_loop_lifecycle_log_enable_);
     DepthBuffer::SetConsoleLogEnabled(this->nav_depth_console_log_enable_);
+    this->StartPerfCsvIfNeeded();
 
     // Keep one extra newest frame in buffer and drop it at inference time for one-frame delay.
     depth_buffer = DepthBuffer(1, 30, 43, this->nav_vision_channels_ + 1);
@@ -1968,8 +2301,12 @@ bool RL_Real::InitHierarchicalNav()
                   << ", loop_overrun_log_enable=" << (this->nav_loop_overrun_log_enable_ ? "true" : "false")
                   << ", loop_lifecycle_log_enable=" << (this->nav_loop_lifecycle_log_enable_ ? "true" : "false")
                   << ", depth_console_log_enable=" << (this->nav_depth_console_log_enable_ ? "true" : "false")
+                  << ", depth_debug_publish_enable=" << (this->nav_depth_debug_publish_enable_ ? "true" : "false")
                   << ", debug_enable=" << (this->nav_debug_enable_ ? "true" : "false")
                   << ", debug_log_interval_s=" << this->nav_debug_log_interval_s_
+                  << ", gamepad_enable=" << (this->nav_gamepad_enable_ ? "true" : "false")
+                  << ", perf_csv_enable=" << (this->nav_perf_csv_enable_ ? "true" : "false")
+                  << ", perf_csv_dir=" << (this->nav_perf_csv_dir_.empty() ? "(default)" : this->nav_perf_csv_dir_)
                   << ", obs_log_enable=" << (this->nav_obs_log_enable_ ? "true" : "false")
                   << ", obs_log_interval_s=" << this->nav_obs_log_interval_s_
                   << ", obs_log_dir=" << (this->nav_obs_log_dir_.empty() ? "(default)" : this->nav_obs_log_dir_)
@@ -2085,6 +2422,8 @@ void RL_Real::UpdateHighFrequencyObs()
 void RL_Real::RunHighLevel()
 {
     using SteadyClock = std::chrono::steady_clock;
+    static bool perf_has_last_tick = false;
+    static SteadyClock::time_point perf_last_tick_tp;
     static bool perf_inited = false;
     static SteadyClock::time_point perf_last_report_tp;
     static double perf_sum_vision_ms = 0.0;
@@ -2094,11 +2433,50 @@ void RL_Real::RunHighLevel()
     static uint64_t perf_samples = 0;
     static uint64_t timeio_check_goal_seq = 0;
     static int timeio_check_count = 0;
+    const auto cycle_begin_tp = SteadyClock::now();
+    double tick_ms = std::numeric_limits<double>::quiet_NaN();
+    if (perf_has_last_tick)
+    {
+        tick_ms = std::chrono::duration<double, std::milli>(cycle_begin_tp - perf_last_tick_tp).count();
+    }
+    perf_last_tick_tp = cycle_begin_tp;
+    perf_has_last_tick = true;
+
+    const auto write_nav_perf_row = [this, cycle_begin_tp, tick_ms](
+        const char *event,
+        double nav_vision_ms,
+        double nav_high_ms) {
+        const double nav_total_ms =
+            std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
+        this->WritePerfCsvRow(
+            event,
+            tick_ms,
+            nav_total_ms,
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            tick_ms,
+            nav_vision_ms,
+            nav_high_ms,
+            nav_total_ms);
+    };
+
     this->PrimeNavRuntimeOnce();
 
     if (!this->nav_enabled_.load())
     {
         this->StopNavObsLogIfNeeded();
+        write_nav_perf_row(
+            "nav_idle",
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN());
         return;
     }
     static auto last_gate_log_tp = std::chrono::steady_clock::time_point{};
@@ -2133,6 +2511,10 @@ void RL_Real::RunHighLevel()
     {
         clear_nav_cmd();
         maybe_log_gate("rl_not_ready", this->nav_goal_seq_.load());
+        write_nav_perf_row(
+            "nav_gate_rl_not_ready",
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN());
         return;
     }
 
@@ -2142,6 +2524,10 @@ void RL_Real::RunHighLevel()
         clear_nav_cmd();
         this->StopNavObsLogIfNeeded();
         maybe_log_gate("no_goal", goal_seq);
+        write_nav_perf_row(
+            "nav_gate_no_goal",
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN());
         return;
     }
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
@@ -2644,6 +3030,7 @@ void RL_Real::RunHighLevel()
                           << ")"
                           << '\n';
             }
+            write_nav_perf_row("nav_goal_reached", vision_ms, high_ms);
             return;
         }
     }
@@ -2673,6 +3060,7 @@ void RL_Real::RunHighLevel()
 #endif
 
     this->nav_timer_left_.store(std::max(0.0, timer_left - this->nav_dt_));
+    write_nav_perf_row("nav_high_level", vision_ms, high_ms);
 
 }
 

@@ -1,10 +1,9 @@
-source /home/ysc/lite_cog_ros2/navigation2-foxy/install/setup.bash
-source /home/ysc/lite_cog_ros2/nav/install/setup.bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-ENABLE_NAV2="${1:-false}"
-if [[ "${ENABLE_NAV2}" != "true" && "${ENABLE_NAV2}" != "false" ]]; then
-    echo "[WARN] Invalid enable_nav2='${ENABLE_NAV2}', fallback to false"
-    ENABLE_NAV2="false"
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ros2 launch hdl_localization lite_localization.launch.py enable_nav2:="${ENABLE_NAV2}"
+# Backward-compatible wrapper:
+#   ./start_nav.sh true
+#   ./start_nav.sh --nav2 true --rviz false ...
+exec "${SCRIPT_DIR}/start_localization.sh" "$@"

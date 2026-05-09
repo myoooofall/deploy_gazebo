@@ -21,7 +21,9 @@
 #include "robot_types.h"
 #include <cmath>
 #include <atomic>
+#include <chrono>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -97,6 +99,7 @@ private:
     std::shared_ptr<RetroidGamepad> gamepad_ptr_;
     RetroidKeys rt_keys_record_, rt_keys_;
     bool first_flag_;
+    bool nav_gamepad_enable_ = false;
     bool joystick_override_active_ = false;
 
     // hierarchical navigation (high-level policy @ 10Hz)
@@ -130,6 +133,26 @@ private:
     void StartNavGoalInput();
     void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
     [[noreturn]] void DisableNavigationWithError(const std::string &stage, const std::string &detail);
+    void StartPerfCsvIfNeeded();
+    void StopPerfCsvIfNeeded();
+    void WritePerfCsvRow(
+        const char *event,
+        double dt_ms = std::numeric_limits<double>::quiet_NaN(),
+        double exec_ms = std::numeric_limits<double>::quiet_NaN(),
+        double sdk_imu_stamp_ms = std::numeric_limits<double>::quiet_NaN(),
+        double sdk_imu_stamp_delta_ms = std::numeric_limits<double>::quiet_NaN(),
+        double imu_pub_dt_ms = std::numeric_limits<double>::quiet_NaN(),
+        double imu_header_stamp_ms = std::numeric_limits<double>::quiet_NaN(),
+        double imu_header_delta_ms = std::numeric_limits<double>::quiet_NaN(),
+        double rl_tick_ms = std::numeric_limits<double>::quiet_NaN(),
+        double rl_infer_ms = std::numeric_limits<double>::quiet_NaN(),
+        double rl_total_ms = std::numeric_limits<double>::quiet_NaN(),
+        double vision_tick_ms = std::numeric_limits<double>::quiet_NaN(),
+        double vision_process_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_tick_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_vision_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_high_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_total_ms = std::numeric_limits<double>::quiet_NaN());
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};
@@ -173,15 +196,24 @@ private:
     double nav_high_command_max_step_y_ = 0.05;
     double nav_high_command_max_step_yaw_ = 0.12;
     int nav_watchdog_timeout_ms_ = 1200; // stale high-level heartbeat timeout
-    bool nav_perf_log_enable_ = false;   // 1Hz-ish high-level perf stats
+    bool nav_perf_log_enable_ = false;   // controlled by nav_debug_enable_
     double nav_perf_log_interval_s_ = 1.0;
-    // Console log policy: keep runtime stdout minimal to reduce jitter.
+    // Runtime diagnostics policy: keep stdout quiet unless nav_debug_enable_ is on.
     bool nav_console_info_enable_ = false;
     bool nav_loop_overrun_log_enable_ = false;
     bool nav_loop_lifecycle_log_enable_ = false;
     bool nav_depth_console_log_enable_ = false;
-    bool nav_debug_enable_ = false;      // extra debug timing logs
+    bool nav_depth_debug_publish_enable_ = false; // publishes extra image topics, keep separate from logs
+    bool nav_debug_enable_ = false;      // master switch for terminal diagnostics
     double nav_debug_log_interval_s_ = 1.0;
+    bool nav_perf_csv_enable_ = false;   // structured timing CSV for NX A/B tests
+    double nav_perf_csv_flush_interval_s_ = 1.0;
+    std::string nav_perf_csv_dir_;
+    std::string nav_perf_csv_path_;
+    std::ofstream nav_perf_csv_stream_;
+    std::mutex nav_perf_csv_mutex_;
+    std::chrono::steady_clock::time_point nav_perf_csv_start_tp_;
+    std::chrono::steady_clock::time_point nav_perf_csv_last_flush_tp_;
     bool nav_obs_log_enable_ = false;    // structured semantic-observation csv logger (for sim-vs-real comparison)
     double nav_obs_log_interval_s_ = 0.1;
     std::string nav_obs_log_dir_;
@@ -239,6 +271,7 @@ private:
 
     // map-frame target comparison interface
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_subscriber_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscriber_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_actual_map_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr nav_goal_pred_map_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr nav_goal_compare_markers_publisher_;
