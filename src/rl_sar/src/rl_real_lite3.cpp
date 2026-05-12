@@ -23,6 +23,25 @@
 
 static std::atomic<bool> g_depth_frame_received{false};
 
+static void TryFlattenRecurrentWeights(torch::jit::script::Module &module)
+{
+    try
+    {
+        module.get_method("flatten_parameters")({});
+    }
+    catch (const c10::Error &)
+    {
+        // Not every ScriptModule exposes flatten_parameters(); recurse into
+        // children and flatten the recurrent submodules that do.
+    }
+
+    for (const auto &child : module.named_children())
+    {
+        torch::jit::script::Module child_module = child.value;
+        TryFlattenRecurrentWeights(child_module);
+    }
+}
+
 static void ConfigureTorchJitForRealtime()
 {
     static std::once_flag once;
@@ -1275,18 +1294,12 @@ void RL_Real::PublishSlamImuFromSdk(const RobotState<double> &state)
     perf_has_last_pub = true;
 
     sensor_msgs::msg::Imu imu_msg;
-    // Use Lite3 SDK IMU timestamp (ms) so IMU/LiDAR stay in the same time domain.
     const int64_t imu_stamp_ms = static_cast<int64_t>(this->robot_data_->imu.timestamp);
-    if (imu_stamp_ms > 0)
-    {
-        imu_msg.header.stamp.sec = static_cast<int32_t>(imu_stamp_ms / 1000);
-        imu_msg.header.stamp.nanosec = static_cast<uint32_t>((imu_stamp_ms % 1000) * 1000000);
-    }
-    else
-    {
-        // Fallback to ROS clock only when SDK timestamp is unavailable.
-        imu_msg.header.stamp = this->get_clock()->now();
-    }
+    // The LiDAR driver publishes /rslidar_points with RCL_STEADY_TIME in ROS2.
+    // Stamp SDK IMU with the same clock domain so offline localization can
+    // associate IMU and LiDAR by header.stamp.
+    static rclcpp::Clock steady_ros_clock(RCL_STEADY_TIME);
+    imu_msg.header.stamp = steady_ros_clock.now();
     imu_msg.header.frame_id = "base_link";
 
     imu_msg.orientation.w = state.imu.quaternion[0];
@@ -2345,6 +2358,8 @@ bool RL_Real::InitHierarchicalNav()
         this->nav_high_model_.eval();
         this->nav_vision_model_.eval();
     }
+    TryFlattenRecurrentWeights(this->nav_high_model_);
+    TryFlattenRecurrentWeights(this->nav_vision_model_);
     std::cout << LOGGER::INFO
               << "Navigation inference device: " << this->nav_infer_device_.str()
               << std::endl;
@@ -2540,6 +2555,7 @@ void RL_Real::RunHighLevel()
     if (new_goal)
     {
         this->ResetNavEpisodeClock();
+        this->ResetNavModelStates();
         this->nav_active_goal_seq_.store(goal_seq);
         this->nav_timer_left_.store(this->nav_episode_length_s_);
         this->nav_hl_beat_seq_.store(0);
