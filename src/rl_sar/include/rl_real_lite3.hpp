@@ -129,6 +129,7 @@ private:
     void ResetNavEpisodeClock();
     void ResetNavModelStates();
     void WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim);
+    void WarmupNavObservationBuffers(int obs_dim, int obs_io_dim, int hf_dim);
     void PrimeNavRuntimeOnce();
     void StartNavGoalInput();
     void SetNavGoalBody(double goal_x, double goal_y, double goal_yaw, const char *source);
@@ -152,7 +153,27 @@ private:
         double nav_tick_ms = std::numeric_limits<double>::quiet_NaN(),
         double nav_vision_ms = std::numeric_limits<double>::quiet_NaN(),
         double nav_high_ms = std::numeric_limits<double>::quiet_NaN(),
-        double nav_total_ms = std::numeric_limits<double>::quiet_NaN());
+        double nav_reset_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_model_reset_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_obs_build_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_state_copy_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_tensor_create_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_cat_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_hist_reset_insert_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_hist_get_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_to_device_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_to_cpu_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_post_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_log_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_publish_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_total_ms = std::numeric_limits<double>::quiet_NaN(),
+        double udp_get_state_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_obs_hist_reset_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_obs_io_hist_reset_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_hf_reset_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_obs_hist_insert_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_obs_io_hist_insert_ms = std::numeric_limits<double>::quiet_NaN(),
+        double nav_hf_insert_ms = std::numeric_limits<double>::quiet_NaN());
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};

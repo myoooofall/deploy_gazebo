@@ -186,6 +186,29 @@ def init_video_writer(output_path: str, fps: float, width: int, height: int) -> 
     return writer
 
 
+def find_bag_topic_window(
+    bag: str,
+    topics,
+    storage_id: str,
+) -> Optional[tuple]:
+    reader = try_open_reader(bag, storage_id)
+    topic_set = set(topics)
+    start_ns = None
+    end_ns = None
+    count = 0
+    while reader.has_next():
+        topic_name, _, timestamp = reader.read_next()
+        if topic_name not in topic_set:
+            continue
+        timestamp = int(timestamp)
+        start_ns = timestamp if start_ns is None else min(start_ns, timestamp)
+        end_ns = timestamp if end_ns is None else max(end_ns, timestamp)
+        count += 1
+    if start_ns is None or end_ns is None:
+        return None
+    return start_ns, end_ns, count
+
+
 def export_depth_video_direct(
     bag: str,
     topic: str,
@@ -194,6 +217,8 @@ def export_depth_video_direct(
     converter: DepthFrameConverter,
     storage_id: str,
     max_frames: int,
+    start_time_ns: Optional[int],
+    end_time_ns: Optional[int],
 ):
     reader = try_open_reader(bag, storage_id)
     topic_types = reader.get_all_topics_and_types()
@@ -210,9 +235,14 @@ def export_depth_video_direct(
 
     try:
         while reader.has_next():
-            topic_name, data, _ = reader.read_next()
+            topic_name, data, timestamp = reader.read_next()
             if topic_name != topic:
                 continue
+            timestamp = int(timestamp)
+            if start_time_ns is not None and timestamp < start_time_ns:
+                continue
+            if end_time_ns is not None and timestamp > end_time_ns:
+                break
             msg = deserialize_message(data, msg_cls)
             bgr = converter.to_bgr_u8(msg)
             h, w = bgr.shape[:2]
@@ -342,6 +372,17 @@ def main():
         help="max frames to export in direct mode; 0 means all",
     )
     parser.add_argument(
+        "--crop-bag",
+        default="",
+        help="optional bag whose topic timestamps define the export window",
+    )
+    parser.add_argument(
+        "--crop-topic",
+        action="append",
+        default=[],
+        help="topic used with --crop-bag; can be repeated",
+    )
+    parser.add_argument(
         "--min-percentile",
         type=float,
         default=2.0,
@@ -393,6 +434,27 @@ def main():
     print(f"[depth-video] mode: {args.mode}")
     print(f"[depth-video] topic: {args.topic}")
     print(f"[depth-video] out: {out}")
+    start_time_ns = None
+    end_time_ns = None
+    if args.crop_bag:
+        crop_bag = os.path.abspath(args.crop_bag)
+        crop_topics = args.crop_topic or [
+            "/nav/cmd_high",
+            "/nav/goal_pred_map",
+            "/nav/goal_error_body",
+        ]
+        window = find_bag_topic_window(crop_bag, crop_topics, args.storage_id)
+        if window is None:
+            raise RuntimeError(
+                f"failed to find crop window in {crop_bag} from topics: {crop_topics}"
+            )
+        start_time_ns, end_time_ns, crop_count = window
+        print(f"[depth-video] crop_bag: {crop_bag}")
+        print(f"[depth-video] crop_topics: {','.join(crop_topics)}")
+        print(
+            f"[depth-video] crop_window: {start_time_ns} -> {end_time_ns} "
+            f"({(end_time_ns - start_time_ns) / 1e9:.3f}s, msgs={crop_count})"
+        )
     converter = DepthFrameConverter(
         min_percentile=args.min_percentile,
         max_percentile=args.max_percentile,
@@ -407,6 +469,8 @@ def main():
             converter=converter,
             storage_id=args.storage_id,
             max_frames=args.max_frames,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
         )
     else:
         export_depth_video_play(

@@ -9,6 +9,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -343,7 +344,7 @@ RL_Real::RL_Real()
 #endif
 
     // loop
-    this->loop_udpRecv = std::make_shared<LoopFunc>("loop_udpRecv", 0.002, std::bind(&RL_Real::UDPRecv, this), 3);
+    this->loop_udpRecv = std::make_shared<LoopFunc>("loop_udpRecv", 0.002, std::bind(&RL_Real::UDPRecv, this));
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real::HandleKeyboard, this));
     this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.dt, std::bind(&RL_Real::RobotControl, this));
     this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.dt * this->params.decimation, std::bind(&RL_Real::RunModel, this));
@@ -685,7 +686,15 @@ void RL_Real::StartPerfCsvIfNeeded()
         << "imu_pub_dt_ms,imu_header_stamp_ms,imu_header_delta_ms,"
         << "rl_tick_ms,rl_infer_ms,rl_total_ms,"
         << "vision_tick_ms,vision_process_ms,"
-        << "nav_tick_ms,nav_vision_ms,nav_high_ms,nav_total_ms\n";
+        << "nav_tick_ms,nav_vision_ms,nav_high_ms,"
+        << "nav_reset_ms,nav_model_reset_ms,nav_obs_build_ms,"
+        << "nav_state_copy_ms,nav_tensor_create_ms,nav_cat_ms,"
+        << "nav_hist_reset_insert_ms,nav_hist_get_ms,"
+        << "nav_to_device_ms,nav_to_cpu_ms,"
+        << "nav_post_ms,nav_log_ms,nav_publish_ms,nav_total_ms,"
+        << "udp_get_state_ms,"
+        << "nav_obs_hist_reset_ms,nav_obs_io_hist_reset_ms,nav_hf_reset_ms,"
+        << "nav_obs_hist_insert_ms,nav_obs_io_hist_insert_ms,nav_hf_insert_ms\n";
     this->nav_perf_csv_stream_.flush();
 
     std::cout << LOGGER::INFO
@@ -720,7 +729,27 @@ void RL_Real::WritePerfCsvRow(
     double nav_tick_ms,
     double nav_vision_ms,
     double nav_high_ms,
-    double nav_total_ms)
+    double nav_reset_ms,
+    double nav_model_reset_ms,
+    double nav_obs_build_ms,
+    double nav_state_copy_ms,
+    double nav_tensor_create_ms,
+    double nav_cat_ms,
+    double nav_hist_reset_insert_ms,
+    double nav_hist_get_ms,
+    double nav_to_device_ms,
+    double nav_to_cpu_ms,
+    double nav_post_ms,
+    double nav_log_ms,
+    double nav_publish_ms,
+    double nav_total_ms,
+    double udp_get_state_ms,
+    double nav_obs_hist_reset_ms,
+    double nav_obs_io_hist_reset_ms,
+    double nav_hf_reset_ms,
+    double nav_obs_hist_insert_ms,
+    double nav_obs_io_hist_insert_ms,
+    double nav_hf_insert_ms)
 {
     if (!this->nav_perf_csv_enable_)
     {
@@ -755,7 +784,27 @@ void RL_Real::WritePerfCsvRow(
         << nav_tick_ms << ","
         << nav_vision_ms << ","
         << nav_high_ms << ","
-        << nav_total_ms << "\n";
+        << nav_reset_ms << ","
+        << nav_model_reset_ms << ","
+        << nav_obs_build_ms << ","
+        << nav_state_copy_ms << ","
+        << nav_tensor_create_ms << ","
+        << nav_cat_ms << ","
+        << nav_hist_reset_insert_ms << ","
+        << nav_hist_get_ms << ","
+        << nav_to_device_ms << ","
+        << nav_to_cpu_ms << ","
+        << nav_post_ms << ","
+        << nav_log_ms << ","
+        << nav_publish_ms << ","
+        << nav_total_ms << ","
+        << udp_get_state_ms << ","
+        << nav_obs_hist_reset_ms << ","
+        << nav_obs_io_hist_reset_ms << ","
+        << nav_hf_reset_ms << ","
+        << nav_obs_hist_insert_ms << ","
+        << nav_obs_io_hist_insert_ms << ","
+        << nav_hf_insert_ms << "\n";
 
     if (std::chrono::duration<double>(now_tp - this->nav_perf_csv_last_flush_tp_).count() >= this->nav_perf_csv_flush_interval_s_)
     {
@@ -1222,33 +1271,70 @@ void RL_Real::UDPRecv()
 
     if (receiver_)
     {
+        const auto get_state_begin_tp = SteadyClock::now();
         robot_data_ = &(receiver_->GetState());
-    }
+        const double get_state_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - get_state_begin_tp).count();
+        const double exec_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - cycle_begin_tp).count();
 
-    double sdk_stamp_ms = std::numeric_limits<double>::quiet_NaN();
-    double sdk_delta_ms = std::numeric_limits<double>::quiet_NaN();
-    if (this->robot_data_ != nullptr)
-    {
-        const int64_t stamp_ms = static_cast<int64_t>(this->robot_data_->imu.timestamp);
-        sdk_stamp_ms = static_cast<double>(stamp_ms);
-        if (stamp_ms > 0 && perf_has_last_sdk_stamp)
+        double sdk_stamp_ms = std::numeric_limits<double>::quiet_NaN();
+        double sdk_delta_ms = std::numeric_limits<double>::quiet_NaN();
+        if (this->robot_data_ != nullptr)
         {
-            sdk_delta_ms = static_cast<double>(stamp_ms - perf_last_sdk_stamp_ms);
+            const int64_t stamp_ms = static_cast<int64_t>(this->robot_data_->imu.timestamp);
+            sdk_stamp_ms = static_cast<double>(stamp_ms);
+            if (stamp_ms > 0 && perf_has_last_sdk_stamp)
+            {
+                sdk_delta_ms = static_cast<double>(stamp_ms - perf_last_sdk_stamp_ms);
+            }
+            if (stamp_ms > 0)
+            {
+                perf_last_sdk_stamp_ms = stamp_ms;
+                perf_has_last_sdk_stamp = true;
+            }
         }
-        if (stamp_ms > 0)
-        {
-            perf_last_sdk_stamp_ms = stamp_ms;
-            perf_has_last_sdk_stamp = true;
-        }
+
+        this->WritePerfCsvRow(
+            "udp_recv",
+            tick_ms,
+            exec_ms,
+            sdk_stamp_ms,
+            sdk_delta_ms,
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN(),
+            get_state_ms);
+        return;
     }
 
     const double exec_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - cycle_begin_tp).count();
     this->WritePerfCsvRow(
         "udp_recv",
         tick_ms,
-        exec_ms,
-        sdk_stamp_ms,
-        sdk_delta_ms);
+        exec_ms);
 }
 
 void RL_Real::EulerToQuaternion(float roll, float pitch, float yaw, float q[4])
@@ -1786,6 +1872,8 @@ void RL_Real::WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim)
         }
     }
 
+    this->WarmupNavObservationBuffers(obs_dim, obs_io_dim, hf_dim);
+
     this->ResetNavModelStates();
     this->nav_high_command_.zero_();
     this->nav_cmd_x_.store(0.0);
@@ -1801,6 +1889,72 @@ void RL_Real::WarmupNavModels(int obs_dim, int obs_io_dim, int hf_dim)
         std::fill(this->nav_last_actions_.begin(), this->nav_last_actions_.end(), 0.0f);
     }
     this->nav_runtime_prime_done_.store(false);
+}
+
+void RL_Real::WarmupNavObservationBuffers(int obs_dim, int obs_io_dim, int hf_dim)
+{
+    torch::NoGradGuard no_grad;
+    torch::InferenceMode infer_mode;
+
+    const auto opts = torch::TensorOptions().dtype(torch::kFloat32);
+    const torch::Tensor obs_frame = torch::zeros({1, obs_dim}, opts);
+    const torch::Tensor obs_io_frame = torch::zeros({1, obs_io_dim}, opts);
+    const torch::Tensor hf_frame = torch::zeros({1, hf_dim}, opts);
+
+    std::vector<int> obs_ids_10;
+    obs_ids_10.reserve(this->nav_obs_hist_len_);
+    for (int i = this->nav_obs_hist_len_ - 1; i >= 0; --i)
+    {
+        obs_ids_10.push_back(i);
+    }
+
+    std::vector<int> obs_ids_20;
+    obs_ids_20.reserve(this->nav_highfreq_hist_len_);
+    for (int i = this->nav_highfreq_hist_len_ - 1; i >= 0; --i)
+    {
+        obs_ids_20.push_back(i);
+    }
+
+    const auto begin_tp = std::chrono::steady_clock::now();
+
+    // Touch the exact torch indexing paths used on the first navigation goal.
+    this->nav_obs_hist_buf_.reset_from_0({0}, obs_frame);
+    this->nav_obs_io_hist_buf_.reset_from_0({0}, obs_io_frame);
+    {
+        std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
+        this->nav_highfreq_buf_.reset({0}, hf_frame);
+    }
+
+    this->nav_obs_hist_buf_.insert(obs_frame);
+    this->nav_obs_io_hist_buf_.insert(obs_io_frame);
+    {
+        std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
+        this->nav_highfreq_buf_.insert(hf_frame);
+    }
+
+    (void)this->nav_obs_io_hist_buf_.get_obs_vec(obs_ids_10);
+    {
+        std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
+        (void)this->nav_highfreq_buf_.get_obs_vec(obs_ids_20);
+    }
+
+    // Leave buffers in the same zero-history state expected before a real goal.
+    this->nav_obs_hist_buf_.reset_from_0({0}, obs_frame);
+    this->nav_obs_io_hist_buf_.reset_from_0({0}, obs_io_frame);
+    {
+        std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
+        this->nav_highfreq_buf_.reset({0}, hf_frame);
+    }
+
+    const double warmup_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - begin_tp).count();
+    if (this->nav_console_info_enable_)
+    {
+        std::cout << LOGGER::INFO
+                  << "[NAV][INIT] observation buffer warmup took "
+                  << std::fixed << std::setprecision(2) << warmup_ms << " ms"
+                  << '\n';
+    }
 }
 
 void RL_Real::PrimeNavRuntimeOnce()
@@ -2449,6 +2603,26 @@ void RL_Real::RunHighLevel()
     static uint64_t timeio_check_goal_seq = 0;
     static int timeio_check_count = 0;
     const auto cycle_begin_tp = SteadyClock::now();
+    const double nav_stage_nan = std::numeric_limits<double>::quiet_NaN();
+    double nav_reset_ms = nav_stage_nan;
+    double nav_model_reset_ms = nav_stage_nan;
+    double nav_obs_build_ms = nav_stage_nan;
+    double nav_state_copy_ms = nav_stage_nan;
+    double nav_tensor_create_ms = nav_stage_nan;
+    double nav_cat_ms = nav_stage_nan;
+    double nav_hist_reset_insert_ms = nav_stage_nan;
+    double nav_hist_get_ms = nav_stage_nan;
+    double nav_obs_hist_reset_ms = nav_stage_nan;
+    double nav_obs_io_hist_reset_ms = nav_stage_nan;
+    double nav_hf_reset_ms = nav_stage_nan;
+    double nav_obs_hist_insert_ms = nav_stage_nan;
+    double nav_obs_io_hist_insert_ms = nav_stage_nan;
+    double nav_hf_insert_ms = nav_stage_nan;
+    double nav_to_device_ms = nav_stage_nan;
+    double nav_to_cpu_ms = nav_stage_nan;
+    double nav_post_ms = nav_stage_nan;
+    double nav_log_ms = nav_stage_nan;
+    double nav_publish_ms = nav_stage_nan;
     double tick_ms = std::numeric_limits<double>::quiet_NaN();
     if (perf_has_last_tick)
     {
@@ -2457,7 +2631,29 @@ void RL_Real::RunHighLevel()
     perf_last_tick_tp = cycle_begin_tp;
     perf_has_last_tick = true;
 
-    const auto write_nav_perf_row = [this, cycle_begin_tp, tick_ms](
+    const auto write_nav_perf_row = [
+        this,
+        cycle_begin_tp,
+        tick_ms,
+        &nav_reset_ms,
+        &nav_model_reset_ms,
+        &nav_obs_build_ms,
+        &nav_state_copy_ms,
+        &nav_tensor_create_ms,
+        &nav_cat_ms,
+        &nav_hist_reset_insert_ms,
+        &nav_hist_get_ms,
+        &nav_obs_hist_reset_ms,
+        &nav_obs_io_hist_reset_ms,
+        &nav_hf_reset_ms,
+        &nav_obs_hist_insert_ms,
+        &nav_obs_io_hist_insert_ms,
+        &nav_hf_insert_ms,
+        &nav_to_device_ms,
+        &nav_to_cpu_ms,
+        &nav_post_ms,
+        &nav_log_ms,
+        &nav_publish_ms](
         const char *event,
         double nav_vision_ms,
         double nav_high_ms) {
@@ -2480,7 +2676,27 @@ void RL_Real::RunHighLevel()
             tick_ms,
             nav_vision_ms,
             nav_high_ms,
-            nav_total_ms);
+            nav_reset_ms,
+            nav_model_reset_ms,
+            nav_obs_build_ms,
+            nav_state_copy_ms,
+            nav_tensor_create_ms,
+            nav_cat_ms,
+            nav_hist_reset_insert_ms,
+            nav_hist_get_ms,
+            nav_to_device_ms,
+            nav_to_cpu_ms,
+            nav_post_ms,
+            nav_log_ms,
+            nav_publish_ms,
+            nav_total_ms,
+            std::numeric_limits<double>::quiet_NaN(),
+            nav_obs_hist_reset_ms,
+            nav_obs_io_hist_reset_ms,
+            nav_hf_reset_ms,
+            nav_obs_hist_insert_ms,
+            nav_obs_io_hist_insert_ms,
+            nav_hf_insert_ms);
     };
 
     this->PrimeNavRuntimeOnce();
@@ -2546,7 +2762,11 @@ void RL_Real::RunHighLevel()
         return;
     }
     const bool new_goal = (goal_seq != this->nav_active_goal_seq_.load());
-    this->StartNavObsLogIfNeeded(goal_seq);
+    {
+        const auto log_begin_tp = SteadyClock::now();
+        this->StartNavObsLogIfNeeded(goal_seq);
+        nav_log_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - log_begin_tp).count();
+    }
 
     const double goal_body_x_initial = this->nav_goal_body_x_.load();
     const double goal_body_y_initial = this->nav_goal_body_y_.load();
@@ -2554,8 +2774,12 @@ void RL_Real::RunHighLevel()
 
     if (new_goal)
     {
+        const auto reset_begin_tp = SteadyClock::now();
         this->ResetNavEpisodeClock();
+        const auto model_reset_begin_tp = SteadyClock::now();
         this->ResetNavModelStates();
+        nav_model_reset_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - model_reset_begin_tp).count();
         this->nav_active_goal_seq_.store(goal_seq);
         this->nav_timer_left_.store(this->nav_episode_length_s_);
         this->nav_hl_beat_seq_.store(0);
@@ -2570,8 +2794,10 @@ void RL_Real::RunHighLevel()
             static_cast<float>(goal_body_yaw_initial),
         }});
         this->nav_spawn_positions_body_initial_ = torch::zeros({1, 3}, torch::dtype(torch::kFloat32));
+        nav_reset_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - reset_begin_tp).count();
     }
 
+    const auto obs_build_begin_tp = SteadyClock::now();
     const double timer_left = this->nav_timer_left_.load();
     const double timer_norm = std::max(0.0, timer_left) / std::max(1e-6, this->nav_episode_length_s_);
     torch::Tensor timer_tensor = torch::tensor({{static_cast<float>(timer_norm)}});
@@ -2581,6 +2807,7 @@ void RL_Real::RunHighLevel()
     std::array<float, 3> imu_gyro_snapshot{0.0f, 0.0f, 0.0f};
     std::array<float, 32> dof_pos_snapshot{};
     std::array<float, 32> dof_vel_snapshot{};
+    const auto state_copy_begin_tp = SteadyClock::now();
     {
         std::lock_guard<std::mutex> lock(this->nav_state_mutex_);
         for (int i = 0; i < 4; ++i)
@@ -2598,6 +2825,10 @@ void RL_Real::RunHighLevel()
             dof_vel_snapshot[i] = static_cast<float>(this->robot_state.motor_state.dq[i]);
         }
     }
+    nav_state_copy_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - state_copy_begin_tp).count();
+
+    const auto tensor_create_begin_tp = SteadyClock::now();
     torch::Tensor base_quat = torch::tensor({{
         imu_quat_snapshot[0],
         imu_quat_snapshot[1],
@@ -2640,6 +2871,14 @@ void RL_Real::RunHighLevel()
     }
     torch::Tensor prev_high_command_scaled =
         prev_high_command * this->params.commands_scale.to(torch::kFloat32);
+    // Sample low-frequency time as late as possible before composing model inputs,
+    // so it stays aligned with hf_hist timestamps in the same nav tick.
+    const double time_io = this->GetNavEpisodeElapsedSec();
+    this->nav_time_io_.store(time_io);
+    torch::Tensor time_io_tensor = torch::tensor({{static_cast<float>(time_io)}});
+    nav_tensor_create_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - tensor_create_begin_tp).count();
+
     if (this->nav_console_info_enable_ && this->nav_debug_enable_)
     {
         static auto last_obs_debug_tp = std::chrono::steady_clock::time_point{};
@@ -2666,11 +2905,7 @@ void RL_Real::RunHighLevel()
             last_obs_debug_tp = now_tp;
         }
     }
-    // Sample low-frequency time as late as possible before composing model inputs,
-    // so it stays aligned with hf_hist timestamps in the same nav tick.
-    const double time_io = this->GetNavEpisodeElapsedSec();
-    this->nav_time_io_.store(time_io);
-    torch::Tensor time_io_tensor = torch::tensor({{static_cast<float>(time_io)}});
+    const auto cat_begin_tp = SteadyClock::now();
     torch::Tensor obs_frame = torch::cat({
         this->nav_position_targets_body_initial_.to(torch::kFloat32),
         this->nav_spawn_positions_body_initial_.to(torch::kFloat32),
@@ -2703,29 +2938,56 @@ void RL_Real::RunHighLevel()
         dof_vel_term,
         actions,
     }, 1);
+    nav_cat_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - cat_begin_tp).count();
 
+    const auto hist_reset_insert_begin_tp = SteadyClock::now();
     if (new_goal)
     {
+        auto hist_step_begin_tp = SteadyClock::now();
         this->nav_obs_hist_buf_.reset_from_0({0}, obs_frame);
+        nav_obs_hist_reset_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - hist_step_begin_tp).count();
+
+        hist_step_begin_tp = SteadyClock::now();
         this->nav_obs_io_hist_buf_.reset_from_0({0}, obs_io_frame);
+        nav_obs_io_hist_reset_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - hist_step_begin_tp).count();
+
+        hist_step_begin_tp = SteadyClock::now();
         {
             std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
             this->nav_highfreq_buf_.reset({0}, obs_io_frame_hf);
         }
+        nav_hf_reset_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - hist_step_begin_tp).count();
     }
     else
     {
+        auto hist_step_begin_tp = SteadyClock::now();
         this->nav_obs_hist_buf_.insert(obs_frame);
+        nav_obs_hist_insert_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - hist_step_begin_tp).count();
+
+        hist_step_begin_tp = SteadyClock::now();
         this->nav_obs_io_hist_buf_.insert(obs_io_frame);
+        nav_obs_io_hist_insert_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - hist_step_begin_tp).count();
     }
 
     // Align HF timeline with current nav tick using the current loop_nav snapshot.
     // This avoids reacquiring nav_state_mutex_ and re-reading shared state.
+    const auto hf_insert_begin_tp = SteadyClock::now();
     {
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         this->nav_highfreq_buf_.insert(obs_io_frame_hf);
     }
+    nav_hf_insert_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - hf_insert_begin_tp).count();
+    nav_hist_reset_insert_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - hist_reset_insert_begin_tp).count();
 
+    const auto hist_get_begin_tp = SteadyClock::now();
     std::vector<int> obs_ids_10;
     obs_ids_10.reserve(this->nav_obs_hist_len_);
     for (int i = this->nav_obs_hist_len_ - 1; i >= 0; --i)
@@ -2745,6 +3007,8 @@ void RL_Real::RunHighLevel()
         std::lock_guard<std::mutex> lock(this->nav_highfreq_mutex_);
         hf_hist = this->nav_highfreq_buf_.get_obs_vec(obs_ids_20);
     }
+    nav_hist_get_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - hist_get_begin_tp).count();
 
     if (new_goal || goal_seq != timeio_check_goal_seq)
     {
@@ -2789,6 +3053,8 @@ void RL_Real::RunHighLevel()
             << " hf_hist_latest_minus_lf=" << (hf_hist_latest_time - time_io);
         std::cout << LOGGER::INFO << oss.str() << '\n';
     }
+    nav_obs_build_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - obs_build_begin_tp).count();
 
     torch::Tensor vision_feat;
     const auto vision_begin_tp = SteadyClock::now();
@@ -2822,6 +3088,7 @@ void RL_Real::RunHighLevel()
         this->DisableNavigationWithError("vision_input", oss.str());
     }
     torch::Tensor depth_model = depth;
+    const auto to_device_begin_tp = SteadyClock::now();
     if (depth_model.device() != this->nav_infer_device_)
     {
         depth_model = depth_model.to(this->nav_infer_device_);
@@ -2835,6 +3102,8 @@ void RL_Real::RunHighLevel()
         obs_io_hist_model = obs_io_hist_model.to(this->nav_infer_device_);
         hf_hist_model = hf_hist_model.to(this->nav_infer_device_);
     }
+    nav_to_device_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - to_device_begin_tp).count();
     vision_feat = this->nav_vision_model_.forward({depth_model}).toTensor();
     const double vision_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - vision_begin_tp).count();
 
@@ -2877,6 +3146,7 @@ void RL_Real::RunHighLevel()
     {
         this->DisableNavigationWithError("output_validate", "invalid high-level output: command tensor missing or too short");
     }
+    const auto to_cpu_begin_tp = SteadyClock::now();
     if (!cmd.device().is_cpu())
     {
         cmd = cmd.to(torch::kCPU, torch::kFloat32);
@@ -2885,7 +3155,10 @@ void RL_Real::RunHighLevel()
     {
         pred_target_body = pred_target_body.to(torch::kCPU, torch::kFloat32);
     }
+    nav_to_cpu_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - to_cpu_begin_tp).count();
 
+    const auto post_begin_tp = SteadyClock::now();
     if (this->nav_perf_log_enable_)
     {
         if (!perf_inited)
@@ -3007,23 +3280,29 @@ void RL_Real::RunHighLevel()
         last_nav_run_log_tp = now_tp;
     }
 
-    this->WriteNavObsSemanticLog(
-        goal_seq,
-        new_goal,
-        time_io,
-        timer_norm,
-        this->nav_position_targets_body_initial_,
-        pred_target_body,
-        cmd_raw,
-        cmd,
-        prev_high_command_scaled,
-        base_ang_vel,
-        projected_gravity,
-        dof_pos_raw,
-        dof_pos_term,
-        dof_vel_raw,
-        dof_vel_term,
-        actions);
+    {
+        const auto log_begin_tp = SteadyClock::now();
+        this->WriteNavObsSemanticLog(
+            goal_seq,
+            new_goal,
+            time_io,
+            timer_norm,
+            this->nav_position_targets_body_initial_,
+            pred_target_body,
+            cmd_raw,
+            cmd,
+            prev_high_command_scaled,
+            base_ang_vel,
+            projected_gravity,
+            dof_pos_raw,
+            dof_pos_term,
+            dof_vel_raw,
+            dof_vel_term,
+            actions);
+        const double log_ms = std::chrono::duration<double, std::milli>(
+            SteadyClock::now() - log_begin_tp).count();
+        nav_log_ms = std::isnan(nav_log_ms) ? log_ms : (nav_log_ms + log_ms);
+    }
 
     if (pred_target_body.defined() && pred_target_body.numel() >= 2)
     {
@@ -3046,11 +3325,16 @@ void RL_Real::RunHighLevel()
                           << ")"
                           << '\n';
             }
+            nav_post_ms = std::chrono::duration<double, std::milli>(
+                SteadyClock::now() - post_begin_tp).count();
             write_nav_perf_row("nav_goal_reached", vision_ms, high_ms);
             return;
         }
     }
 
+    nav_post_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - post_begin_tp).count();
+    const auto publish_begin_tp = SteadyClock::now();
 #if defined(USE_ROS2)
     this->PublishNavGoalComparison(pred_target_body, goal_seq, new_goal);
 #endif
@@ -3074,6 +3358,8 @@ void RL_Real::RunHighLevel()
         this->nav_cmd_high_publisher_->publish(msg);
     }
 #endif
+    nav_publish_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - publish_begin_tp).count();
 
     this->nav_timer_left_.store(std::max(0.0, timer_left - this->nav_dt_));
     write_nav_perf_row("nav_high_level", vision_ms, high_ms);

@@ -65,6 +65,22 @@ LOCALIZATION_CMD='ros2 launch hdl_localization lite_localization.launch.py enabl
 Default enriched output:
 - `$HOME/bags/lite3/enriched/<run_name>_enriched_YYYYmmdd_HHMMSS`
 
+## 3.5) Optional: smooth rosbag storage time for RViz replay
+
+This only rewrites rosbag2 SQLite `messages.timestamp` values. It does not
+change serialized message contents, so lidar/IMU `header.stamp` stays original.
+
+```bash
+cd ~/liangwang_ws/rl_sar_new/rl_sar/src/rl_sar/scripts/offline
+./smooth_bag_record_time.py --merge-split ~/liangwang_ws/rl_sar_new/bag/5-19-2
+```
+
+Outputs:
+- `~/liangwang_ws/rl_sar_new/bag/5-19-2_smooth`
+- `~/liangwang_ws/rl_sar_new/bag/5-19-2_smooth_merged`
+
+For split bags, use the `_smooth_merged` directory with `ros2 bag play`.
+
 ## 4) Export CSV metrics from bag
 
 ```bash
