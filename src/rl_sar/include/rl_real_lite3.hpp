@@ -173,7 +173,8 @@ private:
         double nav_hf_reset_ms = std::numeric_limits<double>::quiet_NaN(),
         double nav_obs_hist_insert_ms = std::numeric_limits<double>::quiet_NaN(),
         double nav_obs_io_hist_insert_ms = std::numeric_limits<double>::quiet_NaN(),
-        double nav_hf_insert_ms = std::numeric_limits<double>::quiet_NaN());
+        double nav_hf_insert_ms = std::numeric_limits<double>::quiet_NaN(),
+        double guide_infer_ms = std::numeric_limits<double>::quiet_NaN());
 
     // nav state shared across loops
     std::atomic<bool> nav_enabled_{false};

@@ -29,7 +29,7 @@ lite3/navi:
   depth_debug_publish_enable: false
   # Structured timing CSV for comparing "navigation only" vs "navigation + rosbag".
   # Default path is <rl_sar>/logs/perf when perf_csv_dir is empty.
-  perf_csv_enable: false
+  perf_csv_enable: True
   perf_csv_flush_interval_s: 1.0
   perf_csv_dir: ""
   # Structured semantic observation logger (CSV): keep disabled on NX realtime runs.

@@ -156,6 +156,8 @@ if(NOT USE_CMAKE AND $ENV{ROS_DISTRO} MATCHES "foxy|humble")
         scripts/offline/replay_localize_and_record.sh
         scripts/offline/export_goal_metrics_from_bag.py
         scripts/offline/pull_bag_from_nx.sh
+        scripts/benchmark/record_nx_power.py
+        scripts/benchmark/summarize_guide_latency.py
         DESTINATION lib/${PROJECT_NAME}
     )
     install(DIRECTORY launch worlds policy DESTINATION share/${PROJECT_NAME})

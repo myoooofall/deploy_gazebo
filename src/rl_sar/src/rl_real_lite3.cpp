@@ -694,7 +694,8 @@ void RL_Real::StartPerfCsvIfNeeded()
         << "nav_post_ms,nav_log_ms,nav_publish_ms,nav_total_ms,"
         << "udp_get_state_ms,"
         << "nav_obs_hist_reset_ms,nav_obs_io_hist_reset_ms,nav_hf_reset_ms,"
-        << "nav_obs_hist_insert_ms,nav_obs_io_hist_insert_ms,nav_hf_insert_ms\n";
+        << "nav_obs_hist_insert_ms,nav_obs_io_hist_insert_ms,nav_hf_insert_ms,"
+        << "guide_infer_ms\n";
     this->nav_perf_csv_stream_.flush();
 
     std::cout << LOGGER::INFO
@@ -749,7 +750,8 @@ void RL_Real::WritePerfCsvRow(
     double nav_hf_reset_ms,
     double nav_obs_hist_insert_ms,
     double nav_obs_io_hist_insert_ms,
-    double nav_hf_insert_ms)
+    double nav_hf_insert_ms,
+    double guide_infer_ms)
 {
     if (!this->nav_perf_csv_enable_)
     {
@@ -804,7 +806,8 @@ void RL_Real::WritePerfCsvRow(
         << nav_hf_reset_ms << ","
         << nav_obs_hist_insert_ms << ","
         << nav_obs_io_hist_insert_ms << ","
-        << nav_hf_insert_ms << "\n";
+        << nav_hf_insert_ms << ","
+        << guide_infer_ms << "\n";
 
     if (std::chrono::duration<double>(now_tp - this->nav_perf_csv_last_flush_tp_).count() >= this->nav_perf_csv_flush_interval_s_)
     {
@@ -2623,6 +2626,7 @@ void RL_Real::RunHighLevel()
     double nav_post_ms = nav_stage_nan;
     double nav_log_ms = nav_stage_nan;
     double nav_publish_ms = nav_stage_nan;
+    double guide_infer_ms = nav_stage_nan;
     double tick_ms = std::numeric_limits<double>::quiet_NaN();
     if (perf_has_last_tick)
     {
@@ -2653,7 +2657,8 @@ void RL_Real::RunHighLevel()
         &nav_to_cpu_ms,
         &nav_post_ms,
         &nav_log_ms,
-        &nav_publish_ms](
+        &nav_publish_ms,
+        &guide_infer_ms](
         const char *event,
         double nav_vision_ms,
         double nav_high_ms) {
@@ -2696,7 +2701,8 @@ void RL_Real::RunHighLevel()
             nav_hf_reset_ms,
             nav_obs_hist_insert_ms,
             nav_obs_io_hist_insert_ms,
-            nav_hf_insert_ms);
+            nav_hf_insert_ms,
+            guide_infer_ms);
     };
 
     this->PrimeNavRuntimeOnce();
@@ -3087,6 +3093,9 @@ void RL_Real::RunHighLevel()
             << " (history_steps=" << (this->nav_vision_channels_ + 1) << ")";
         this->DisableNavigationWithError("vision_input", oss.str());
     }
+    // End-to-end GUIDE inference starts at the deployment boundary: CPU tensors
+    // ready, followed by device transfer, both model forwards, and output sync.
+    const auto guide_infer_begin_tp = SteadyClock::now();
     torch::Tensor depth_model = depth;
     const auto to_device_begin_tp = SteadyClock::now();
     if (depth_model.device() != this->nav_infer_device_)
@@ -3157,6 +3166,10 @@ void RL_Real::RunHighLevel()
     }
     nav_to_cpu_ms = std::chrono::duration<double, std::milli>(
         SteadyClock::now() - to_cpu_begin_tp).count();
+    // Tensor::to(CPU) is blocking by default, so this endpoint includes all
+    // queued CUDA work without adding an extra synchronization to the hot path.
+    guide_infer_ms = std::chrono::duration<double, std::milli>(
+        SteadyClock::now() - guide_infer_begin_tp).count();
 
     const auto post_begin_tp = SteadyClock::now();
     if (this->nav_perf_log_enable_)
